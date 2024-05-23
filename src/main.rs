@@ -1,16 +1,21 @@
 use eyre::Result;
 use petgraph::{graph::NodeIndex, Directed};
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::runtime::Runtime;
 use macroquad::prelude::*;
 use fdg::{
     fruchterman_reingold::{FruchtermanReingold, FruchtermanReingoldConfiguration},
-    petgraph::Graph,
     simple::Center,
     Force, ForceGraph,
 };
+// use petgraph::graph::Node;
+use petgraph::Graph;
+use std::fs::File;
+use std::io::{Read, Write};
+use clap::{ValueEnum, Parser};
+use std::fs;
 
 #[allow(dead_code, non_snake_case)]
 #[derive(Debug, Deserialize)]
@@ -21,7 +26,7 @@ struct TransactionResponse {
 }
 
 #[allow(dead_code, non_snake_case)]
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 struct Transaction {
     blockHash: String,
     blockNumber: String,
@@ -44,29 +49,27 @@ struct Transaction {
     methodId: String,
 }
 
-const API_KEY: Option<&str> = None;
 const TRAVERSAL_STARTING_ADDRESS: &str = "0x60D170c2b604a4B613b43805aE4657476DCA9E38";
 const MAX_GRAPH_TRAVERSAL_DEPTH: usize = 4; // Depth of 1 will always be searched, so max depth of 0 is the same as max depth of 1.
 const MAX_TOTAL_TRANSACTIONS: usize = 100; // Limit of transactions at which parsing will be stopped.
 const MAX_TRANSACTIONS_FROM_EACH_ADDRESS: usize = 20; // Limit of transactions to parse (from and to) one particular address.
-const TO_RUN_VISUALISATION: bool = true; 
+const DATA_STORAGE_FOLDER: &str = "data";
 
 async fn get_transactions_for_address(
     address: &str,
     client: &Client,
-    api_key: Option<&str>,
+    api_key: &String,
 ) -> Result<TransactionResponse> {
     let start_block = "0";
     let end_block = "99999999";
     let page = "1";
     let sort = "desc";
-    let key = if let Some(key) = api_key {key} else {panic!("Please set API_KEY.")};
     let max_transactions_for_each_adress = MAX_TRANSACTIONS_FROM_EACH_ADDRESS.to_string();
     let offset = max_transactions_for_each_adress.as_str();
 
     let request_url = format!(
         "https://api.etherscan.io/api?module=account&action=txlist&address={}&startblock={}&endblock={}&page={}&offset={}&sort={}&apikey={}",
-        address, start_block, end_block, page, offset, sort, key
+        address, start_block, end_block, page, offset, sort, api_key
     );
     let response = client.get(&request_url).send().await.unwrap();
 
@@ -93,16 +96,17 @@ async fn recursive_graph_traversion(
     node_indices: &mut HashMap<String, NodeIndex>,
     edges: &mut HashMap<String, Transaction>,
     client: &Client,
-    adress_to_check: Vec<String>,
+    api_key: &String,
+    adresses_to_check: Vec<String>,
 ) {
     let mut new_adresses_to_check: Vec<String> = vec![];
-    for address in adress_to_check {
+    for address in adresses_to_check {
         let response = {
             loop {
-                let attempt = get_transactions_for_address(&address, client, API_KEY).await;
+                let attempt = get_transactions_for_address(&address, client, api_key).await;
                 match attempt {
                     Err(e) => {
-                        println!("Attempting again for {}...: {}", &address[0..10], e);
+                        println!("Incorrect response for {}...:\n{}", &address[0..10], e);
                     }
                     Ok(t) => {
                         println!("Correct response for {}...", &address[0..10]);
@@ -131,7 +135,7 @@ async fn recursive_graph_traversion(
                 blockchain_graph.add_edge(origin, target, transaction.clone());
                 edges.insert(transaction.hash.clone(), transaction.clone());
                 println!(
-                    "Added transaction {}... --> {}... | from block {}",
+                    "Added transaction {}... --> {}... from block {}",
                     &transaction.from.as_str()[0..10],
                     &transaction.to.as_str()[0..10],
                     transaction.timeStamp
@@ -148,6 +152,7 @@ async fn recursive_graph_traversion(
                 node_indices,
                 edges,
                 client,
+                api_key,
                 vec![address],
             ));
             future.await;
@@ -155,24 +160,34 @@ async fn recursive_graph_traversion(
     }
 }
 
-async fn get_graph() -> Graph<String, Transaction> {
+async fn parse_blockchain(mut initial_blockchain_graph: Graph::<String, Transaction, Directed>, api_key: &String) -> Graph<String, Transaction> {
     let client = Client::new();
     let starting_adresses = vec![TRAVERSAL_STARTING_ADDRESS.to_string()];
 
-    let mut blockchain_graph = Graph::<String, Transaction, Directed>::new();
-    let mut node_indices: HashMap<String, NodeIndex> = HashMap::new();
-    let mut edges: HashMap<String, Transaction> = HashMap::new();
+    let mut node_indices = HashMap::new();
+    for node_index in initial_blockchain_graph.node_indices() {
+        let node_label = initial_blockchain_graph[node_index].clone();
+        node_indices.insert(node_label, node_index);
+    }
+
+    let mut edges = HashMap::new();
+    for edge_index in initial_blockchain_graph.edge_indices() {
+        let edge_weight = initial_blockchain_graph[edge_index].clone();
+        edges.insert(edge_weight.hash.clone(), edge_weight);
+    }
+
     recursive_graph_traversion(
         0,
-        &mut blockchain_graph,
+        &mut initial_blockchain_graph,
         &mut node_indices,
         &mut edges,
         &client,
+        api_key,
         starting_adresses,
     )
     .await;
 
-    blockchain_graph
+    initial_blockchain_graph
 }
 
 async fn draw_graph(force_graph: &mut ForceGraph<f32, 3, String, Transaction>) {
@@ -237,14 +252,131 @@ async fn draw_graph(force_graph: &mut ForceGraph<f32, 3, String, Transaction>) {
     }
 }
 
-#[macroquad::main("Eth local graph")] // Comment if you do not need a visualisation
-async fn main() {  // Remove async if you do not need a visualisation
-    let rt = Runtime::new().unwrap();
-    let graph = rt.block_on(get_graph());
-    println!("Parsed Graph:\n{:#?}", &graph);
+#[derive(Serialize, Deserialize)]
+struct SerializableGraph {
+    nodes: Vec<String>,
+    edges: Vec<(usize, usize, Transaction)>,
+}
 
-    if TO_RUN_VISUALISATION { // Comment this block if you do not need a visualisation
-        let mut force_graph: ForceGraph<f32, 3, String, Transaction> = fdg::init_force_graph_uniform(graph.clone(), 400.0);
-        draw_graph(&mut force_graph).await;
+fn serialize_graph(graph: &Graph<String, Transaction, Directed>, pathname: &str) -> Result<()> {
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+
+    for node in graph.node_indices() {
+        nodes.push(graph[node].clone());
     }
+
+    for edge in graph.edge_indices() {
+        let (source, target) = graph.edge_endpoints(edge).unwrap();
+        edges.push((source.index(), target.index(), graph[edge].clone()));
+    }
+
+    let serializable_graph = SerializableGraph { nodes, edges };
+    let json = serde_json::to_string(&serializable_graph).unwrap();
+
+    fs::create_dir_all(DATA_STORAGE_FOLDER).unwrap();
+    let file_pathname = format!("{}/{}", DATA_STORAGE_FOLDER, pathname);
+    let mut file = File::create(&file_pathname).unwrap();
+    file.write_all(json.as_bytes()).unwrap();
+    println!("\nSaved graph with {} Edges and {} Nodes as {}", &graph.edge_count(), &graph.node_count(), &file_pathname);
+    Ok(())
+}
+
+fn deserialize_graph(pathname: &str) -> Result<Graph<String, Transaction, Directed>> {
+    let file_pathname = format!("{}/{}", DATA_STORAGE_FOLDER, pathname);
+    let mut json = String::new();
+    
+    println!("\nTrying to load {}", file_pathname);
+    let mut file = File::open(&file_pathname).map_err(|_| eyre::eyre!(format!("File {} not found.", file_pathname)))
+    .unwrap();
+
+    file.read_to_string(&mut json).unwrap();
+
+    let serializable_graph: SerializableGraph = serde_json::from_str(&json)?;
+
+    let mut graph = Graph::new();
+    let mut node_indices = Vec::new();
+
+    for node in serializable_graph.nodes {
+        node_indices.push(graph.add_node(node));
+    }
+
+    for (source, target, weight) in serializable_graph.edges {
+        graph.add_edge(node_indices[source], node_indices[target], weight);
+    }
+
+    Ok(graph)
+}
+
+
+fn get_api_key() -> String {
+    let mut api_key: String = String::new();
+    File::open("api_key.txt")
+        .map_err(|_| eyre::eyre!("Please provide an Etherscan API key inside of api_key.txt"))
+        .unwrap()
+        .read_to_string(&mut api_key).unwrap();
+    api_key = api_key.trim().to_string();
+    assert_ne!(api_key, "");
+    api_key
+}
+
+#[derive(Parser, Debug)]
+#[clap(name = "eth_parser")]
+struct Opt {
+    #[clap(value_enum, short, long, default_value_t = Mode::Load)]
+    mode: Mode,
+    
+    #[clap(short, long, default_value_t = true)]
+    draw: bool,
+
+    #[clap(short, long, default_value = "example.json")]
+    file: String,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
+enum Mode {
+    Load,
+    ParseSave,
+    LoadParseSave,
+} 
+
+#[macroquad::main("Eth local graph")]
+async fn main() {
+    let opt = Opt::parse();
+ 
+    match opt.mode {
+        Mode::Load => {
+            let initial_blockchain_graph = deserialize_graph(&opt.file).unwrap();
+            if opt.draw {
+                let mut force_graph: ForceGraph<f32, 3, String, Transaction> = fdg::init_force_graph_uniform(initial_blockchain_graph.clone(), 400.0);
+                draw_graph(&mut force_graph).await;
+            } 
+        },
+        Mode::ParseSave => {
+            let api_key = get_api_key();
+            let initial_blockchain_graph = Graph::<String, Transaction, Directed>::new();
+            let rt = Runtime::new().unwrap();
+            let graph = rt.block_on(parse_blockchain(initial_blockchain_graph, &api_key));
+            serialize_graph(&graph, &opt.file).unwrap();
+            
+            if opt.draw {
+                let mut force_graph: ForceGraph<f32, 3, String, Transaction> = fdg::init_force_graph_uniform(graph.clone(), 400.0);
+                draw_graph(&mut force_graph).await;
+            } 
+        },
+
+        Mode::LoadParseSave => {
+            let api_key = get_api_key();
+            let initial_blockchain_graph = deserialize_graph(&opt.file).unwrap();
+            let rt = Runtime::new().unwrap();
+            let graph = rt.block_on(parse_blockchain(initial_blockchain_graph, &api_key));
+            serialize_graph(&graph, &opt.file).unwrap();
+
+            if opt.draw {
+                let mut force_graph: ForceGraph<f32, 3, String, Transaction> = fdg::init_force_graph_uniform(graph.clone(), 400.0);
+                draw_graph(&mut force_graph).await;
+            }
+        },
+    };
+
 }
