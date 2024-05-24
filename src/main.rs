@@ -1,5 +1,5 @@
 use eyre::Result;
-use petgraph::{graph::NodeIndex, Directed};
+use petgraph::{graph::{NodeIndex,EdgeIndex}, Directed};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -10,12 +10,12 @@ use fdg::{
     simple::Center,
     Force, ForceGraph,
 };
-// use petgraph::graph::Node;
 use petgraph::Graph;
 use std::fs::File;
 use std::io::{Read, Write};
 use clap::{ValueEnum, Parser};
 use std::fs;
+use std::collections::HashSet;
 
 #[allow(dead_code, non_snake_case)]
 #[derive(Debug, Deserialize)]
@@ -51,9 +51,10 @@ struct Transaction {
 
 const TRAVERSAL_STARTING_ADDRESS: &str = "0x60D170c2b604a4B613b43805aE4657476DCA9E38";
 const MAX_GRAPH_TRAVERSAL_DEPTH: usize = 4; // Depth of 1 will always be searched, so max depth of 0 is the same as max depth of 1.
-const MAX_TOTAL_TRANSACTIONS: usize = 100; // Limit of transactions at which parsing will be stopped.
-const MAX_TRANSACTIONS_FROM_EACH_ADDRESS: usize = 20; // Limit of transactions to parse (from and to) one particular address.
+const MAX_TOTAL_TRANSACTIONS: usize = 100000; // Limit of transactions at which parsing will be stopped.
+const MAX_TRANSACTIONS_FROM_EACH_ADDRESS: usize = 500; // Limit of transactions to parse (from and to) one particular address.
 const DATA_STORAGE_FOLDER: &str = "data";
+const SECONDS_IN_DAY: usize = 86400;
 
 async fn get_transactions_for_address(
     address: &str,
@@ -64,8 +65,7 @@ async fn get_transactions_for_address(
     let end_block = "99999999";
     let page = "1";
     let sort = "desc";
-    let max_transactions_for_each_adress = MAX_TRANSACTIONS_FROM_EACH_ADDRESS.to_string();
-    let offset = max_transactions_for_each_adress.as_str();
+    let offset = MAX_TRANSACTIONS_FROM_EACH_ADDRESS;
 
     let request_url = format!(
         "https://api.etherscan.io/api?module=account&action=txlist&address={}&startblock={}&endblock={}&page={}&offset={}&sort={}&apikey={}",
@@ -100,7 +100,9 @@ async fn recursive_graph_traversion(
     adresses_to_check: Vec<String>,
 ) {
     let mut new_adresses_to_check: Vec<String> = vec![];
-    for address in adresses_to_check {
+    
+    'address_checking:  for address in adresses_to_check {
+        if blockchain_graph.edge_count() >= MAX_TOTAL_TRANSACTIONS {break 'address_checking};
         let response = {
             loop {
                 let attempt = get_transactions_for_address(&address, client, api_key).await;
@@ -115,10 +117,10 @@ async fn recursive_graph_traversion(
                 }
             }
         };
-
         for transaction in response.result.iter() {
+            if transaction.contractAddress == "".to_string()
+            && !edges.contains_key(&transaction.hash)  {
 
-            if !edges.contains_key(&transaction.hash) && blockchain_graph.edge_count() < MAX_TOTAL_TRANSACTIONS {
                 let origin = *node_indices
                     .entry(transaction.from.clone())
                     .or_insert_with(|| {
@@ -143,6 +145,8 @@ async fn recursive_graph_traversion(
             }
         }
     }
+
+    if blockchain_graph.edge_count() >= MAX_TOTAL_TRANSACTIONS {return};
 
     if current_depth + 1 < MAX_GRAPH_TRAVERSAL_DEPTH {
         for address in new_adresses_to_check {
@@ -252,6 +256,84 @@ async fn draw_graph(force_graph: &mut ForceGraph<f32, 3, String, Transaction>) {
     }
 }
 
+async fn draw_graph_highlighted(
+    force_graph: &mut ForceGraph<f32, 3, String, Transaction>, 
+    reversed_graph: &Graph<String, Transaction, Directed>
+) {
+    let mut angle: f32 = 0.0; 
+    let radius = 800.0; 
+    
+    let mut force = FruchtermanReingold {
+        conf: FruchtermanReingoldConfiguration {
+            scale: 400.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    loop {
+        force.apply_many(force_graph, 1);
+        Center::default().apply(force_graph);
+        clear_background(WHITE);
+
+        angle += 0.01; // Camera angle rotation
+        if angle > 2.0 * 3.1416 {
+            angle -= 2.0 * 3.1416;
+        }
+        let camera_x: f32 = radius * angle.cos();
+        let camera_z = radius * angle.sin();
+
+        set_camera(&Camera3D {
+            position: vec3(camera_x, 0.0, camera_z),
+            up: vec3(0., 1., 0.),
+            target: vec3(0., 0., 0.), 
+            ..Default::default()
+        });
+
+        for idx in force_graph.edge_indices() {
+            let (source_idx, target_idx) = force_graph.edge_endpoints(idx).unwrap();
+            let (source_name, source_pos) = force_graph.node_weight(source_idx).unwrap();
+            let (target_name, target_pos) = force_graph.node_weight(target_idx).unwrap();
+
+            let transaction = force_graph.edge_weight(idx).unwrap();
+            let color = if reversed_graph.contains_edge(source_idx, target_idx) {
+                BLUE
+            } else {
+                BLACK
+            };
+
+            draw_line_3d(
+                vec3(source_pos.coords.x, source_pos.coords.y, source_pos.coords.z),
+                vec3(target_pos.coords.x, target_pos.coords.y, target_pos.coords.z),
+                color,
+            );
+        }
+
+        for (name, pos) in force_graph.node_weights() {
+            draw_sphere(
+                vec3(pos.coords.x, pos.coords.y, pos.coords.z),
+                if name.as_str() == TRAVERSAL_STARTING_ADDRESS.to_lowercase() {6.0} else {2.0},
+                None,
+                if name.as_str() == TRAVERSAL_STARTING_ADDRESS.to_lowercase() {BLUE} else {RED},
+            );
+        }
+
+        next_frame().await
+    }
+}
+
+
+fn calculate_total_transaction_value(graph: &Graph<String, Transaction, Directed>) -> f64 {
+    graph.edge_indices()
+        .map(|edge_index| {
+            let transaction = &graph[edge_index];
+            let value: f64 = transaction.value.parse().unwrap_or(0.0);
+            value
+        })
+        .sum()
+}
+
+
 #[derive(Serialize, Deserialize)]
 struct SerializableGraph {
     nodes: Vec<String>,
@@ -338,7 +420,51 @@ enum Mode {
     Load,
     ParseSave,
     LoadParseSave,
+    Analysis,
 } 
+
+fn find_reversed_transactions(
+    graph: &Graph<String, Transaction, Directed>,
+    max_time_difference_in_seconds: u64, 
+) -> Graph<String, Transaction, Directed> {
+    println!("Iterating over pairs of edges.");
+    let mut reversed_graph = Graph::<String, Transaction, Directed>::new();
+    let mut node_indices = HashMap::new();
+    let mut paired_transactions = HashSet::new();
+
+    for edge_a in graph.edge_indices() {
+        let transaction_a = &graph[edge_a];
+        let time_a: u64 = transaction_a.timeStamp.parse().unwrap();
+        if paired_transactions.contains(&transaction_a.hash) {continue}
+
+        for edge_b in graph.edge_indices() {
+            let transaction_b = &graph[edge_b];
+            if paired_transactions.contains(&transaction_b.hash) {continue}
+            let time_b: u64 = transaction_b.timeStamp.parse().unwrap();
+
+            if transaction_a.from == transaction_b.to &&
+               transaction_a.to == transaction_b.from &&
+               transaction_a.hash != transaction_b.hash &&
+               time_a <= time_b &&
+               time_b <= time_a + max_time_difference_in_seconds {
+                    let from_a = *node_indices.entry(transaction_a.from.clone()).or_insert_with(|| reversed_graph.add_node(transaction_a.from.clone()));
+                    let to_a = *node_indices.entry(transaction_a.to.clone()).or_insert_with(|| reversed_graph.add_node(transaction_a.to.clone()));
+                    reversed_graph.add_edge(from_a, to_a, transaction_a.clone());
+
+                    let from_b = *node_indices.entry(transaction_b.from.clone()).or_insert_with(|| reversed_graph.add_node(transaction_b.from.clone()));
+                    let to_b = *node_indices.entry(transaction_b.to.clone()).or_insert_with(|| reversed_graph.add_node(transaction_b.to.clone()));
+                    reversed_graph.add_edge(from_b, to_b, transaction_b.clone());
+
+                    paired_transactions.insert(transaction_a.hash.clone());
+                    paired_transactions.insert(transaction_b.hash.clone());
+
+                    break;
+            }
+        }
+    }
+
+    reversed_graph
+}
 
 #[macroquad::main("Eth local graph")]
 async fn main() {
@@ -371,12 +497,29 @@ async fn main() {
             let rt = Runtime::new().unwrap();
             let graph = rt.block_on(parse_blockchain(initial_blockchain_graph, &api_key));
             serialize_graph(&graph, &opt.file).unwrap();
-
+            
             if opt.draw {
                 let mut force_graph: ForceGraph<f32, 3, String, Transaction> = fdg::init_force_graph_uniform(graph.clone(), 400.0);
                 draw_graph(&mut force_graph).await;
             }
         },
+
+        Mode::Analysis =>{
+            let initial_blockchain_graph = Graph::<String, Transaction, Directed>::new();
+            let api_key = get_api_key();
+            let rt = Runtime::new().unwrap();
+            let graph = rt.block_on(parse_blockchain(initial_blockchain_graph, &api_key));
+            let reversed_transactions = find_reversed_transactions(&graph, SECONDS_IN_DAY as u64); 
+            
+            let total_transfered = calculate_total_transaction_value(&graph);
+            let total_reversed_transfer = calculate_total_transaction_value(&reversed_transactions);
+            
+            dbg!(&total_transfered);
+            dbg!(&total_reversed_transfer);
+        
+            serialize_graph(&graph, "all.json").unwrap(); 
+            serialize_graph(&reversed_transactions, "reversed.json").unwrap(); 
+        }
     };
 
 }
