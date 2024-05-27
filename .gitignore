@@ -3,5 +3,5 @@
 
 /target
 api_key.txt
-data/*
-!data/example.json
+json/*
+!json/handcrafted_for_testing.json

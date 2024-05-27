@@ -1,21 +1,14 @@
 use eyre::Result;
-use petgraph::{graph::{NodeIndex,EdgeIndex}, Directed};
+use petgraph::{graph::NodeIndex, visit::EdgeRef, Directed};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::runtime::Runtime;
-use macroquad::prelude::*;
-use fdg::{
-    fruchterman_reingold::{FruchtermanReingold, FruchtermanReingoldConfiguration},
-    simple::Center,
-    Force, ForceGraph,
-};
 use petgraph::Graph;
-use std::fs::File;
-use std::io::{Read, Write};
-use clap::{ValueEnum, Parser};
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Write, Read};
 use std::collections::HashSet;
+use std::time::Instant;
 
 #[allow(dead_code, non_snake_case)]
 #[derive(Debug, Deserialize)]
@@ -49,12 +42,11 @@ struct Transaction {
     methodId: String,
 }
 
-const TRAVERSAL_STARTING_ADDRESS: &str = "0x60D170c2b604a4B613b43805aE4657476DCA9E38";
+const TRAVERSAL_STARTING_ADDRESS: &str = "0x4976A4A02f38326660D17bf34b431dC6e2eb2327"; // Binance affiliated address
 const MAX_GRAPH_TRAVERSAL_DEPTH: usize = 4; // Depth of 1 will always be searched, so max depth of 0 is the same as max depth of 1.
-const MAX_TOTAL_TRANSACTIONS: usize = 100000; // Limit of transactions at which parsing will be stopped.
-const MAX_TRANSACTIONS_FROM_EACH_ADDRESS: usize = 500; // Limit of transactions to parse (from and to) one particular address.
-const DATA_STORAGE_FOLDER: &str = "data";
-const SECONDS_IN_DAY: usize = 86400;
+const MAX_TOTAL_TRANSACTIONS: usize = 100_000_000; // Limit of transactions at which parsing will be stopped.
+const MAX_TRANSACTIONS_FROM_EACH_ADDRESS: usize = 10_000; // Limit of transactions to parse (from and to) one particular address.
+const DATA_STORAGE_FOLDER: &str = "json";
 
 async fn get_transactions_for_address(
     address: &str,
@@ -137,7 +129,7 @@ async fn recursive_graph_traversion(
                 blockchain_graph.add_edge(origin, target, transaction.clone());
                 edges.insert(transaction.hash.clone(), transaction.clone());
                 println!(
-                    "Added transaction {}... --> {}... from block {}",
+                    "Added transaction {}... --> {}... at {} unix epoch",
                     &transaction.from.as_str()[0..10],
                     &transaction.to.as_str()[0..10],
                     transaction.timeStamp
@@ -194,146 +186,6 @@ async fn parse_blockchain(mut initial_blockchain_graph: Graph::<String, Transact
     initial_blockchain_graph
 }
 
-async fn draw_graph(force_graph: &mut ForceGraph<f32, 3, String, Transaction>) {
-    let mut angle: f32 = 0.0; 
-    let radius = 800.0; 
-    
-    let mut force = FruchtermanReingold {
-        conf: FruchtermanReingoldConfiguration {
-            scale: 400.0,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-
-    loop {
-        force.apply_many(force_graph, 1);
-        Center::default().apply(force_graph);
-        clear_background(WHITE);
-
-        angle += 0.01; // Camera angle rotation
-        if angle > 2.0 * 3.1416 {
-            angle -= 2.0 * 3.1416;
-        }
-        let camera_x: f32 = radius * angle.cos();
-        let camera_z = radius * angle.sin();
-
-        set_camera(&Camera3D {
-            position: vec3(camera_x, 0.0, camera_z),
-            up: vec3(0., 1., 0.),
-            target: vec3(0., 0., 0.), 
-            ..Default::default()
-        });
-
-        for idx in force_graph.edge_indices() {
-            let ((_, source), (_, target)) = force_graph
-                .edge_endpoints(idx)
-                .map(|(a, b)| {
-                    (
-                        force_graph.node_weight(a).unwrap(),
-                        force_graph.node_weight(b).unwrap(),
-                    )
-                })
-                .unwrap();
-
-            draw_line_3d(
-                vec3(source.coords.x, source.coords.y, source.coords.z),
-                vec3(target.coords.x, target.coords.y, target.coords.z),
-                BLACK,
-            );
-        }
-
-        for (name, pos) in force_graph.node_weights() {
-            draw_sphere(
-                vec3(pos.coords.x, pos.coords.y, pos.coords.z),
-                if name.as_str() == TRAVERSAL_STARTING_ADDRESS.to_lowercase() {6.0} else {2.0},
-                None,
-                if name.as_str() == TRAVERSAL_STARTING_ADDRESS.to_lowercase() {BLUE} else {RED},
-            );
-        }
-
-        next_frame().await
-    }
-}
-
-async fn draw_graph_highlighted(
-    force_graph: &mut ForceGraph<f32, 3, String, Transaction>, 
-    reversed_graph: &Graph<String, Transaction, Directed>
-) {
-    let mut angle: f32 = 0.0; 
-    let radius = 800.0; 
-    
-    let mut force = FruchtermanReingold {
-        conf: FruchtermanReingoldConfiguration {
-            scale: 400.0,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-
-    loop {
-        force.apply_many(force_graph, 1);
-        Center::default().apply(force_graph);
-        clear_background(WHITE);
-
-        angle += 0.01; // Camera angle rotation
-        if angle > 2.0 * 3.1416 {
-            angle -= 2.0 * 3.1416;
-        }
-        let camera_x: f32 = radius * angle.cos();
-        let camera_z = radius * angle.sin();
-
-        set_camera(&Camera3D {
-            position: vec3(camera_x, 0.0, camera_z),
-            up: vec3(0., 1., 0.),
-            target: vec3(0., 0., 0.), 
-            ..Default::default()
-        });
-
-        for idx in force_graph.edge_indices() {
-            let (source_idx, target_idx) = force_graph.edge_endpoints(idx).unwrap();
-            let (source_name, source_pos) = force_graph.node_weight(source_idx).unwrap();
-            let (target_name, target_pos) = force_graph.node_weight(target_idx).unwrap();
-
-            let transaction = force_graph.edge_weight(idx).unwrap();
-            let color = if reversed_graph.contains_edge(source_idx, target_idx) {
-                BLUE
-            } else {
-                BLACK
-            };
-
-            draw_line_3d(
-                vec3(source_pos.coords.x, source_pos.coords.y, source_pos.coords.z),
-                vec3(target_pos.coords.x, target_pos.coords.y, target_pos.coords.z),
-                color,
-            );
-        }
-
-        for (name, pos) in force_graph.node_weights() {
-            draw_sphere(
-                vec3(pos.coords.x, pos.coords.y, pos.coords.z),
-                if name.as_str() == TRAVERSAL_STARTING_ADDRESS.to_lowercase() {6.0} else {2.0},
-                None,
-                if name.as_str() == TRAVERSAL_STARTING_ADDRESS.to_lowercase() {BLUE} else {RED},
-            );
-        }
-
-        next_frame().await
-    }
-}
-
-
-fn calculate_total_transaction_value(graph: &Graph<String, Transaction, Directed>) -> f64 {
-    graph.edge_indices()
-        .map(|edge_index| {
-            let transaction = &graph[edge_index];
-            let value: f64 = transaction.value.parse().unwrap_or(0.0);
-            value
-        })
-        .sum()
-}
-
-
 #[derive(Serialize, Deserialize)]
 struct SerializableGraph {
     nodes: Vec<String>,
@@ -354,16 +206,17 @@ fn serialize_graph(graph: &Graph<String, Transaction, Directed>, pathname: &str)
     }
 
     let serializable_graph = SerializableGraph { nodes, edges };
-    let json = serde_json::to_string(&serializable_graph).unwrap();
-
     fs::create_dir_all(DATA_STORAGE_FOLDER).unwrap();
     let file_pathname = format!("{}/{}", DATA_STORAGE_FOLDER, pathname);
-    let mut file = File::create(&file_pathname).unwrap();
-    file.write_all(json.as_bytes()).unwrap();
-    println!("\nSaved graph with {} Edges and {} Nodes as {}", &graph.edge_count(), &graph.node_count(), &file_pathname);
+    let file = File::create(&file_pathname).unwrap();
+    serde_json::to_writer_pretty(file, &serializable_graph).unwrap();
+
+    println!("\nSaved graph with {} edges and {} nodes as {}\n", &graph.edge_count(), &graph.node_count(), &file_pathname);
     Ok(())
 }
 
+
+#[allow(dead_code)]
 fn deserialize_graph(pathname: &str) -> Result<Graph<String, Transaction, Directed>> {
     let file_pathname = format!("{}/{}", DATA_STORAGE_FOLDER, pathname);
     let mut json = String::new();
@@ -390,11 +243,10 @@ fn deserialize_graph(pathname: &str) -> Result<Graph<String, Transaction, Direct
     Ok(graph)
 }
 
-
 fn get_api_key() -> String {
     let mut api_key: String = String::new();
     File::open("api_key.txt")
-        .map_err(|_| eyre::eyre!("Please provide an Etherscan API key inside of api_key.txt"))
+        .map_err(|_| eyre::eyre!("Please provide an Etherscan API key (put it inside api_key.txt)"))
         .unwrap()
         .read_to_string(&mut api_key).unwrap();
     api_key = api_key.trim().to_string();
@@ -402,124 +254,283 @@ fn get_api_key() -> String {
     api_key
 }
 
-#[derive(Parser, Debug)]
-#[clap(name = "eth_parser")]
-struct Opt {
-    #[clap(value_enum, short, long, default_value_t = Mode::Load)]
-    mode: Mode,
-    
-    #[clap(short, long, default_value_t = true)]
-    draw: bool,
+fn filter_twoway_edges(graph: &Graph<String, Transaction, Directed>) -> Graph<String, Transaction, Directed> {
+    let mut filtered_graph = graph.clone();
+    filtered_graph.clear_edges();
 
-    #[clap(short, long, default_value = "example.json")]
-    file: String,
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
-enum Mode {
-    Load,
-    ParseSave,
-    LoadParseSave,
-    Analysis,
-} 
-
-fn find_reversed_transactions(
-    graph: &Graph<String, Transaction, Directed>,
-    max_time_difference_in_seconds: u64, 
-) -> Graph<String, Transaction, Directed> {
-    println!("Iterating over pairs of edges.");
-    let mut reversed_graph = Graph::<String, Transaction, Directed>::new();
-    let mut node_indices = HashMap::new();
-    let mut paired_transactions = HashSet::new();
-
-    for edge_a in graph.edge_indices() {
-        let transaction_a = &graph[edge_a];
-        let time_a: u64 = transaction_a.timeStamp.parse().unwrap();
-        if paired_transactions.contains(&transaction_a.hash) {continue}
-
-        for edge_b in graph.edge_indices() {
-            let transaction_b = &graph[edge_b];
-            if paired_transactions.contains(&transaction_b.hash) {continue}
-            let time_b: u64 = transaction_b.timeStamp.parse().unwrap();
-
-            if transaction_a.from == transaction_b.to &&
-               transaction_a.to == transaction_b.from &&
-               transaction_a.hash != transaction_b.hash &&
-               time_a <= time_b &&
-               time_b <= time_a + max_time_difference_in_seconds {
-                    let from_a = *node_indices.entry(transaction_a.from.clone()).or_insert_with(|| reversed_graph.add_node(transaction_a.from.clone()));
-                    let to_a = *node_indices.entry(transaction_a.to.clone()).or_insert_with(|| reversed_graph.add_node(transaction_a.to.clone()));
-                    reversed_graph.add_edge(from_a, to_a, transaction_a.clone());
-
-                    let from_b = *node_indices.entry(transaction_b.from.clone()).or_insert_with(|| reversed_graph.add_node(transaction_b.from.clone()));
-                    let to_b = *node_indices.entry(transaction_b.to.clone()).or_insert_with(|| reversed_graph.add_node(transaction_b.to.clone()));
-                    reversed_graph.add_edge(from_b, to_b, transaction_b.clone());
-
-                    paired_transactions.insert(transaction_a.hash.clone());
-                    paired_transactions.insert(transaction_b.hash.clone());
-
-                    break;
-            }
+    for edge in graph.edge_references() {
+        let (source, target) = (edge.source(), edge.target());
+        if graph.find_edge(target, source).is_some() {
+            let transaction = edge.weight().clone();
+            filtered_graph.add_edge(source, target, transaction);
         }
     }
 
-    reversed_graph
+    filtered_graph
 }
 
-#[macroquad::main("Eth local graph")]
-async fn main() {
-    let opt = Opt::parse();
- 
-    match opt.mode {
-        Mode::Load => {
-            let initial_blockchain_graph = deserialize_graph(&opt.file).unwrap();
-            if opt.draw {
-                let mut force_graph: ForceGraph<f32, 3, String, Transaction> = fdg::init_force_graph_uniform(initial_blockchain_graph.clone(), 400.0);
-                draw_graph(&mut force_graph).await;
-            } 
-        },
-        Mode::ParseSave => {
-            let api_key = get_api_key();
-            let initial_blockchain_graph = Graph::<String, Transaction, Directed>::new();
-            let rt = Runtime::new().unwrap();
-            let graph = rt.block_on(parse_blockchain(initial_blockchain_graph, &api_key));
-            serialize_graph(&graph, &opt.file).unwrap();
-            
-            if opt.draw {
-                let mut force_graph: ForceGraph<f32, 3, String, Transaction> = fdg::init_force_graph_uniform(graph.clone(), 400.0);
-                draw_graph(&mut force_graph).await;
-            } 
-        },
+fn calculate_two_way_flow(graph: &Graph<String, Transaction, Directed>, prices: &Vec<Record>) -> (f64, f64, f64, String) {
+    let mut detailed_log = String::new();
+    let mut total_volume_usd = 0.0;
+    let mut total_flow_usd = 0.0;
 
-        Mode::LoadParseSave => {
-            let api_key = get_api_key();
-            let initial_blockchain_graph = deserialize_graph(&opt.file).unwrap();
-            let rt = Runtime::new().unwrap();
-            let graph = rt.block_on(parse_blockchain(initial_blockchain_graph, &api_key));
-            serialize_graph(&graph, &opt.file).unwrap();
-            
-            if opt.draw {
-                let mut force_graph: ForceGraph<f32, 3, String, Transaction> = fdg::init_force_graph_uniform(graph.clone(), 400.0);
-                draw_graph(&mut force_graph).await;
-            }
-        },
+    let mut visited_pairs = HashSet::new();
+    for first_edge in graph.edge_references() {
+        let node_a = first_edge.source();
+        let node_b = first_edge.target();
 
-        Mode::Analysis =>{
-            let initial_blockchain_graph = Graph::<String, Transaction, Directed>::new();
-            let api_key = get_api_key();
-            let rt = Runtime::new().unwrap();
-            let graph = rt.block_on(parse_blockchain(initial_blockchain_graph, &api_key));
-            let reversed_transactions = find_reversed_transactions(&graph, SECONDS_IN_DAY as u64); 
-            
-            let total_transfered = calculate_total_transaction_value(&graph);
-            let total_reversed_transfer = calculate_total_transaction_value(&reversed_transactions);
-            
-            dbg!(&total_transfered);
-            dbg!(&total_reversed_transfer);
+        if visited_pairs.contains(&(node_a, node_b)) {continue}
+
+        let mut pair_volume_usd = 0.0;
+        let mut sum_a_to_b_usd = 0.0;
+        let mut sum_b_to_a_usd = 0.0;
         
-            serialize_graph(&graph, "all.json").unwrap(); 
-            serialize_graph(&reversed_transactions, "reversed.json").unwrap(); 
-        }
-    };
+        let edges_a_to_b = graph.edges_connecting(node_a, node_b).count();
+        let edges_b_to_a = graph.edges_connecting(node_b, node_a).count();
+        let edges_info: String = if node_a != node_b {
+                format!("{} + {}", edges_a_to_b, edges_b_to_a)
+            } else {             
+                format!("{} self", edges_a_to_b)
+            };
+        
+        detailed_log.push_str(&format!(
+            "Two-way transaction set for addresses {:?}... <-> {:?}... ({}):\n",
+            &graph[node_a][0..10], &graph[node_b][0..10], &edges_info
+        ));
 
+        for edge in graph.edges(node_a) {
+            if edge.target() == node_b {
+                let volume_wei: f64 = edge.weight().value.parse().unwrap();
+                let timestamp: u64 = edge.weight().timeStamp.parse().unwrap();
+                let volume_in_usd = (volume_wei / 1e18) * get_price_at_timestamp(timestamp, prices);
+                pair_volume_usd += volume_in_usd;
+                sum_a_to_b_usd += volume_in_usd;
+                detailed_log.push_str(&format!("      |-> hash: {} at {} unix epoch, volume: {:.0} USD\n", &edge.weight().hash, timestamp, volume_in_usd));
+            }
+        }
+
+        if node_a != node_b { 
+            for edge in graph.edges(node_b) {
+                if edge.target() == node_a {
+                    let volume_wei: f64 = edge.weight().value.parse().unwrap();
+                    let timestamp: u64 = edge.weight().timeStamp.parse().unwrap();
+                    let volume_in_usd = (volume_wei / 1e18) * get_price_at_timestamp(timestamp, prices);
+                    pair_volume_usd += volume_in_usd;
+                    sum_b_to_a_usd += volume_in_usd;
+                    detailed_log.push_str(&format!("      <-| hash: {} at {} unix epoch, volume: {:.0} USD\n", &edge.weight().hash, timestamp, volume_in_usd));
+                }
+            }
+        } 
+        let pair_flow_usd = if node_a != node_b {
+            (sum_a_to_b_usd - sum_b_to_a_usd).abs()
+        } else {
+            0.0
+        };
+        total_volume_usd += pair_volume_usd;
+        total_flow_usd += pair_flow_usd;
+
+        visited_pairs.insert((node_a, node_b));
+        visited_pairs.insert((node_b, node_a));
+
+        detailed_log.push_str(&format!(
+            "Volume for this set: {:.0} USD, Flow for this set: {:.0} USD\n\n",
+            pair_volume_usd, pair_flow_usd
+        ));
+
+    }
+
+    detailed_log.push_str(&format!("Total volume: {:.0} USD\n", total_volume_usd));
+    detailed_log.push_str(&format!("Total flow: {:.0} USD\n", total_flow_usd));
+
+    (total_volume_usd, total_volume_usd/graph.edge_count() as f64, total_flow_usd, detailed_log)
+}
+
+
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct Record {
+    unix_epoch_at_the_start_of_averaging_period: u64,
+    average_price_in_usd: f64,
+    symbol: String,
+}
+
+fn get_eth_hourly_prices(file_path: &str) -> Result<Vec<Record>> {
+    let mut reader = csv::Reader::from_path(file_path).unwrap();
+    let mut records = Vec::new();
+
+    for result in reader.records() {
+        let record = result.unwrap();
+        let unix_epoch_at_the_start_of_averaging_period: u64 = record[0].parse::<f64>().unwrap().round() as u64;
+        let average_price_in_usd: f64 = record[1].parse().unwrap();
+        let symbol = record[2].to_string();
+
+        records.push(Record {
+            unix_epoch_at_the_start_of_averaging_period,
+            average_price_in_usd,
+            symbol,
+        });
+    }
+
+    Ok(records)
+}
+
+fn get_price_at_timestamp(timestamp: u64, prices: &Vec<Record>) -> f64 {
+    let maybe_price = prices.iter().find(|&price| {
+        let period_start = price.unix_epoch_at_the_start_of_averaging_period as u64;
+        let period_end = period_start + 3600;
+        period_start <= timestamp && timestamp < period_end
+    }).map(|price| price.average_price_in_usd);
+
+    match maybe_price {
+        Some(price) => price,
+        None => {
+            let last_record = prices.iter()
+            .max_by(|record_a, record_b| record_a.unix_epoch_at_the_start_of_averaging_period.cmp(&record_b.unix_epoch_at_the_start_of_averaging_period));
+            let last_timestamp = last_record.unwrap().unix_epoch_at_the_start_of_averaging_period;
+            let last_price = last_record.unwrap().average_price_in_usd;
+
+            if timestamp > last_timestamp {last_price} else {panic!("No price found")}
+        }
+    }
+
+}
+
+fn filter_by_transaction_price(
+    graph: &Graph<String, Transaction, Directed>,
+    prices: &Vec<Record>,
+    lower_usd_bound: f64,
+    higher_usd_bound: f64
+) -> Graph<String, Transaction, Directed> {
+    let mut filtered_graph = graph.clone();
+    filtered_graph.clear_edges();
+
+    for edge in graph.edge_references() {
+        let transaction = edge.weight();
+        let timestamp: u64 = transaction.timeStamp.parse().unwrap();
+        let eth_price = get_price_at_timestamp(timestamp, prices);
+        let transaction_value_in_usd = (transaction.value.parse::<f64>().unwrap() / 1e18) * eth_price;
+        if lower_usd_bound <= transaction_value_in_usd && transaction_value_in_usd <= higher_usd_bound {
+            filtered_graph.add_edge(edge.source(), edge.target(), transaction.clone());
+        }
+    }
+
+    filtered_graph
+}
+
+fn calculate_total_usd_volume(graph: &Graph<String, Transaction, Directed>, prices: &Vec<Record>) -> (f64, f64) {
+    let mut total_volume_usd = 0.0;
+
+    for edge in graph.edge_references() {
+        let transaction = edge.weight();
+        let timestamp: u64 = transaction.timeStamp.parse().unwrap();
+        let eth_price = get_price_at_timestamp(timestamp, prices);
+        let transaction_value_in_usd = (transaction.value.parse::<f64>().unwrap() / 1e18) * eth_price;
+        total_volume_usd += transaction_value_in_usd;
+    }
+    let mean_value_usd = total_volume_usd / graph.edge_count() as f64;
+
+    (total_volume_usd, mean_value_usd)
+}
+
+#[test]
+fn test_main() ->Result<(), ()> {  
+    let graph = deserialize_graph("handcrafted_for_testing.json").unwrap();
+    let prices = get_eth_hourly_prices("eth_prices.csv").unwrap();
+
+    let (graph_volume, graph_mean) = calculate_total_usd_volume(&graph, &prices);
+    assert_eq!(graph_volume.ceil(), 21011.0);
+    assert_eq!(graph_mean.ceil(), 2627.0);
+    assert_eq!(graph.edge_count(), 8);
+
+    // Price filtered graph
+    let usd_lower_bound = 10.0;
+    let usd_higher_bound = 1000.0;
+    let price_filtered_graph = filter_by_transaction_price(&graph, &prices, usd_lower_bound, usd_higher_bound);
+    let (price_filtered_graph_volume, price_filtered_graph_mean) = calculate_total_usd_volume(&price_filtered_graph, &prices);
+    assert_eq!(price_filtered_graph_volume.ceil(), 1127.0);
+    assert_eq!(price_filtered_graph_mean.ceil(), 564.0);
+    assert_eq!(price_filtered_graph.edge_count(), 2);
+    
+    // Two-way filtered graph
+    let twoway_filtered_graph = filter_twoway_edges(&graph);
+    let (twoway_filtered_graph_volume, twoway_filtered_graph_mean_value, twoway_filtered_graph_flow, _) = calculate_two_way_flow(&twoway_filtered_graph, &prices);
+    assert_eq!(twoway_filtered_graph_volume.ceil(), 12009.0) ;
+    assert_eq!(twoway_filtered_graph_mean_value.ceil(), 2002.0);
+    assert_eq!(twoway_filtered_graph_flow.ceil(), 3755.0);
+    assert_eq!(twoway_filtered_graph.edge_count(), 6);
+    
+    // Two-way and price filtered graph
+    let twoway_price_filtered_graph = filter_twoway_edges(&price_filtered_graph);
+    let (twoway_price_filtered_graph_volume, _, twoway_price_filtered_graph_flow, _) = calculate_two_way_flow(&twoway_price_filtered_graph, &prices);
+    assert_eq!(twoway_price_filtered_graph_volume, 0.0);
+    assert_eq!(twoway_price_filtered_graph_flow, 0.0);
+    assert_eq!(twoway_price_filtered_graph.edge_count(), 0);
+    
+    Ok(())
+}
+
+fn main() {  
+    let timer: Instant = Instant::now();
+    let api_key = get_api_key();
+    let rt = Runtime::new().unwrap();
+    let initial_graph = Graph::<String, Transaction, Directed>::new();
+    let graph = rt.block_on(parse_blockchain(initial_graph, &api_key));
+    
+    println!("Async operations took {:.3} s", timer.elapsed().as_secs_f64());
+    let mut main_log = String::new();
+    serialize_graph(&graph, "parsed.json").unwrap(); 
+    let prices = get_eth_hourly_prices("eth_prices.csv").unwrap();
+
+    let (graph_volume, graph_mean) = calculate_total_usd_volume(&graph, &prices);
+    let s = format!(
+        "For all parsed transactions:\nTotal volume: {:.0} USD, Mean value: {:.0} USD, N: {}\n\n",
+        graph_volume, graph_mean, graph.edge_count()
+    );
+    print!("{}", &s);
+    main_log.push_str(&s);
+
+    // Price filtered graph
+    let usd_lower_bound = 10.0;
+    let usd_higher_bound = 1000.0;
+    let price_filtered_graph = filter_by_transaction_price(&graph, &prices, usd_lower_bound, usd_higher_bound);
+    let (price_filtered_graph_volume, price_filtered_graph_mean) = calculate_total_usd_volume(&price_filtered_graph, &prices);
+    let s = format!(
+        "For transactions in {}-{} USD range:\nTotal volume: {:.0} USD, Mean value: {:.0} USD, N: {}\n\n",
+        usd_lower_bound, usd_higher_bound, price_filtered_graph_volume, price_filtered_graph_mean, price_filtered_graph.edge_count()
+    );
+    print!("{}", &s);
+    main_log.push_str(&s);   
+
+    // Two-way filtered graph
+    let twoway_filtered_graph = filter_twoway_edges(&graph);
+    let (twoway_filtered_graph_volume, twoway_filtered_graph_mean_value, twoway_filtered_graph_flow, twoway_filtered_graph_logs) = calculate_two_way_flow(&twoway_filtered_graph, &prices);
+    let s = format!(
+        "For two-way transactions: \nTotal volume: {:.0} USD, Mean value: {:.0} USD, Total flow: {:.0} USD, N: {}\n\n",
+        twoway_filtered_graph_volume, twoway_filtered_graph_mean_value, twoway_filtered_graph_flow, twoway_filtered_graph.edge_count()
+    );
+    print!("{}", &s);
+    main_log.push_str(&s);
+    
+    // Two-way and price filtered graph
+    let twoway_price_filtered_graph = filter_twoway_edges(&price_filtered_graph);
+    let (twoway_price_filtered_graph_volume, twoway_price_filtered_graph_mean_value, twoway_price_filtered_graph_flow, twoway_price_filtered_graph_logs) = calculate_two_way_flow(&twoway_price_filtered_graph, &prices);
+    let s = format!(
+        "For two-way transactions in {}-{} USD range: \nTotal volume: {:.0} USD, Mean value: {:.0} USD, Total flow: {:.0} USD, N: {}\n\n",
+        usd_lower_bound, usd_higher_bound, twoway_price_filtered_graph_volume, twoway_price_filtered_graph_mean_value, twoway_price_filtered_graph_flow, twoway_price_filtered_graph.edge_count()
+    );
+    print!("{}", &s);
+    main_log.push_str(&s);
+
+    let mut log_file_main= File::create("main_log.txt").unwrap();    
+    write!(log_file_main, "{}", main_log).unwrap();
+
+    let mut log_file_twoway = File::create("twoway_filtered_graph_logs.txt").unwrap();    
+    let mut log_file_twoway_price = File::create("twoway_price_filtered_graph_logs.txt").unwrap();    
+    let twoway_filtered_graph_logs = format!("Two-way transactions in {}-{} USD range detailed logs:\n{}", usd_lower_bound, usd_higher_bound, twoway_filtered_graph_logs);
+    let twoway_price_filtered_graph_logs = format!("Two-way transactions detailed logs:\n{}", twoway_price_filtered_graph_logs);
+    log_file_twoway.write_all(twoway_filtered_graph_logs.as_bytes()).unwrap();
+    log_file_twoway_price.write_all(twoway_price_filtered_graph_logs.as_bytes()).unwrap();
+
+    println!("Local + async operations took {:.3} s", timer.elapsed().as_secs_f64());
 }
