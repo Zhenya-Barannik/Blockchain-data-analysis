@@ -100,10 +100,10 @@ async fn recursive_graph_traversion(
                 let attempt = get_transactions_for_address(&address, client, api_key).await;
                 match attempt {
                     Err(e) => {
-                        println!("Incorrect response for {}...:\n{}", &address[0..10], e);
+                        println!("Incorrect response for {}:\n{}", &address, e);
                     }
                     Ok(t) => {
-                        println!("Correct response for {}...", &address[0..10]);
+                        println!("Correct response for {}", &address);
                         break t;
                     }
                 }
@@ -111,8 +111,8 @@ async fn recursive_graph_traversion(
         };
         for transaction in response.result.iter() {
             if transaction.contractAddress == "".to_string()
-            && !edges.contains_key(&transaction.hash)  {
-
+            && !edges.contains_key(&transaction.hash)
+            && transaction.from != "GENESIS" {
                 let origin = *node_indices
                     .entry(transaction.from.clone())
                     .or_insert_with(|| {
@@ -129,12 +129,15 @@ async fn recursive_graph_traversion(
                 blockchain_graph.add_edge(origin, target, transaction.clone());
                 edges.insert(transaction.hash.clone(), transaction.clone());
                 println!(
-                    "Added transaction {}... --> {}... at {} unix epoch",
-                    &transaction.from.as_str()[0..10],
-                    &transaction.to.as_str()[0..10],
+                    "Added transaction {} --> {} at {} unix epoch",
+                    &transaction.from.as_str(),
+                    &transaction.to.as_str(),
                     transaction.timeStamp
                 );
             }
+            if  transaction.from == "GENESIS" {
+                println!("Genesis transaction skipped!")
+            };
         }
     }
 
@@ -294,8 +297,8 @@ fn calculate_two_way_flow(graph: &Graph<String, Transaction, Directed>, prices: 
             };
         
         detailed_log.push_str(&format!(
-            "Two-way transaction set for addresses {:?}... <-> {:?}... ({}):\n",
-            &graph[node_a][0..10], &graph[node_b][0..10], &edges_info
+            "Two-way transaction set for addresses {:?} <-> {:?} ({}):\n",
+            &graph[node_a], &graph[node_b], &edges_info
         ));
 
         for edge in graph.edges(node_a) {

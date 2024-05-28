@@ -1,9 +1,9 @@
 timeStamp at which 1 ETH had price 3000 USD:
     "timeStamp": "1708822800",
 
-Some timeStamp at the time of writing and futher.
-ETH price for these timeStamps is not listed in eth_prices.csv,
-so the last know price should be used (3754.908571428571 USD/ETH).
+Some timeStamps at the time of writing and futher.
+ETH prices for these timeStamps are not listed in the eth_prices.csv,
+so the last know price will be used (3754.908571428571 USD/ETH).
     "timeStamp": "1716825864",
     "timeStamp": "1716825964",
     "timeStamp": "1716826064",
