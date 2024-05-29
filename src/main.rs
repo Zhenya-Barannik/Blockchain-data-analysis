@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::runtime::Runtime;
 use petgraph::Graph;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{Write, Read};
 use std::collections::HashSet;
 use std::time::Instant;
@@ -65,9 +65,8 @@ struct EthPriceRecord {
 type G = Graph<String, SimplifiedTransaction, Directed>;
 
 const TRAVERSAL_STARTING_ADDRESS: &str = "0x4976A4A02f38326660D17bf34b431dC6e2eb2327"; // Binance affiliated address
-const MAX_GRAPH_TRAVERSAL_DEPTH: usize = 4; // Depth of 1 will always be searched, so max depth of 0 is the same as max depth of 1.
-const MAX_TOTAL_TRANSACTIONS: usize = 20_000; // Limit of transactions at which parsing will be stopped.
-const MAX_TRANSACTIONS_FROM_EACH_ADDRESS: usize = 10_000; // Limit of transactions to parse (from and to) one particular address.
+const MAX_TRANSACTIONS_TO_PARSE: usize = 100_000_000; // Limit of transactions near which parsing will be stopped.
+const TRANSACTIONS_TO_REQUEST_FROM_EACH_ADDRESS: usize = 10_000; // Limit of transactions to request (from and to) one particular address, <= 10000
 const DATA_STORAGE_FOLDER: &str = "json";
 
 async fn get_transactions_for_address(
@@ -79,7 +78,7 @@ async fn get_transactions_for_address(
     let end_block = "99999999";
     let page = "1";
     let sort = "desc";
-    let offset = MAX_TRANSACTIONS_FROM_EACH_ADDRESS;
+    let offset = TRANSACTIONS_TO_REQUEST_FROM_EACH_ADDRESS;
 
     let request_url = format!(
         "https://api.etherscan.io/api?module=account&action=txlist&address={}&startblock={}&endblock={}&page={}&offset={}&sort={}&apikey={}",
@@ -104,118 +103,106 @@ async fn get_transactions_for_address(
     }
 }
 
-async fn recursive_graph_traversion(
-    current_depth: usize,
+async fn graph_data_collection_procedure(
+    address_relevance_counter: &mut HashMap<String, u64>,
     blockchain_graph: &mut G,
     node_indices: &mut HashMap<String, NodeIndex>,
     edges: &mut HashMap<String, SimplifiedTransaction>,
     client: &Client,
     api_key: &String,
-    adresses_to_check: Vec<String>,
+    address_to_check: String,
 ) {
-    let mut new_adresses_to_check: Vec<String> = vec![];
-    
-    'address_checking:  for address in adresses_to_check {
-        if blockchain_graph.edge_count() >= MAX_TOTAL_TRANSACTIONS {break 'address_checking};
-        let response = {
-            loop {
-                let attempt = get_transactions_for_address(&address, client, api_key).await;
-                match attempt {
-                    Err(e) => {
-                        println!("Incorrect response for {}:\n{}", &address, e);
-                    }
-                    Ok(t) => {
-                        println!("Correct response for {}", &address);
-                        break t;
-                    }
+
+    let response = {
+        loop {
+            let attempt = get_transactions_for_address(&address_to_check, client, api_key).await;
+            match attempt {
+                Err(e) => {
+                    println!("Incorrect response for {}:\n{}", &address_to_check, e);
+                }
+                Ok(t) => {
+                    println!("Correct response for {} with {} transactions", &address_to_check, t.result.len());
+                    break t;
                 }
             }
-        };
-        for transaction in response.result.iter() {
-            if transaction.contractAddress == "".to_string()
-            && transaction.isError == "0"
-            && transaction.from != "GENESIS" 
-            && !edges.contains_key(&transaction.hash)
-            {
-                let simplified_transacion = SimplifiedTransaction {
-                    hash: transaction.hash.clone(),
-                    value: transaction.value.clone(),
-                    timeStamp: transaction.timeStamp.clone()
-                };
-            
-                let origin = *node_indices
-                    .entry(transaction.from.clone())
-                    .or_insert_with(|| {
-                        new_adresses_to_check.push(transaction.from.clone());
-                        blockchain_graph.add_node(transaction.from.clone())
-                    });
-                let target = *node_indices
-                    .entry(transaction.to.clone())
-                    .or_insert_with(|| {
-                        new_adresses_to_check.push(transaction.to.clone());
-                        blockchain_graph.add_node(transaction.to.clone())
-                    });
+        }
+    };
 
-                edges.insert(transaction.hash.clone(), simplified_transacion.clone());
-                blockchain_graph.add_edge(origin, target, simplified_transacion);
-                println!(
-                    "Added transaction {} --> {} at {} unix epoch",
-                    &transaction.from.as_str(),
-                    &transaction.to.as_str(),
-                    transaction.timeStamp
-                );
-            }
+    for transaction in response.result.iter() {
+        if transaction.contractAddress == "".to_string()
+        && transaction.isError == "0"
+        && transaction.from != "GENESIS" 
+        && !edges.contains_key(&transaction.hash)
+        {
+            *address_relevance_counter.entry(transaction.to.clone()).or_insert(0) +=1; // Counting to find the best direction to move futher
+            *address_relevance_counter.entry(transaction.from.clone()).or_insert(0) +=1; // Counting to find the best direction to move futher 
+
+            let simplified_transacion = SimplifiedTransaction {
+                hash: transaction.hash.clone(),
+                value: transaction.value.clone(),
+                timeStamp: transaction.timeStamp.clone()
+            };
+        
+            let origin = *node_indices
+                .entry(transaction.from.clone())
+                .or_insert_with(|| {
+                    blockchain_graph.add_node(transaction.from.clone())
+                });
+
+            let target = *node_indices
+                .entry(transaction.to.clone())
+                .or_insert_with(|| {
+                    blockchain_graph.add_node(transaction.to.clone())
+                });
+
+            edges.insert(transaction.hash.clone(), simplified_transacion.clone());
+            blockchain_graph.add_edge(origin, target, simplified_transacion);
         }
     }
 
-    if blockchain_graph.edge_count() >= MAX_TOTAL_TRANSACTIONS {return};
+}
 
-    if current_depth + 1 < MAX_GRAPH_TRAVERSAL_DEPTH {
-        for address in new_adresses_to_check {
-            let future = Box::pin(recursive_graph_traversion(
-                current_depth + 1,
-                blockchain_graph,
-                node_indices,
-                edges,
-                client,
+async fn parse_blockchain(traversal_starting_adress: String, api_key: &String) -> Graph<String, SimplifiedTransaction> {
+    let client = Client::new();
+    let mut blockchain_graph: Graph::<String, SimplifiedTransaction, Directed> = Graph::new();
+    let mut node_indices = HashMap::new();
+    let mut edges = HashMap::new();
+
+    let mut address_relevance_counter: HashMap<String, u64> = HashMap::from([(traversal_starting_adress.clone().to_lowercase(), 1)]);
+    let mut trajectory: Vec<String> = vec![];
+    
+    loop {
+        let current_edge_count = blockchain_graph.edge_count();
+        println!("Current transaction count is {} out of {}", current_edge_count, MAX_TRANSACTIONS_TO_PARSE);
+        if current_edge_count >= MAX_TRANSACTIONS_TO_PARSE {return blockchain_graph};
+        
+        let mut counts: Vec<(String, u64)> = address_relevance_counter.clone()
+            .into_iter()
+            .map(|(k, v)| (k.clone(), v))
+            .collect();
+            counts.sort_by(|a, b| b.1.cmp(&a.1));
+        
+        let priority_address = counts
+            .iter()
+            .map(|(address, _)| address.clone())
+            .find(|address| !trajectory.contains(address))
+            .unwrap();
+        
+            trajectory.push(priority_address.clone());
+
+            let future = graph_data_collection_procedure(
+                &mut address_relevance_counter,
+                &mut blockchain_graph,
+                &mut node_indices,
+                &mut edges,
+                &client, 
                 api_key,
-                vec![address],
-            ));
+                priority_address,
+            );
             future.await;
         }
     }
-}
-
-async fn parse_blockchain(mut initial_blockchain_graph: Graph::<String, SimplifiedTransaction, Directed>, api_key: &String) -> Graph<String, SimplifiedTransaction> {
-    let client = Client::new();
-    let starting_adresses = vec![TRAVERSAL_STARTING_ADDRESS.to_string()];
-
-    let mut node_indices = HashMap::new();
-    for node_index in initial_blockchain_graph.node_indices() {
-        let node_label = initial_blockchain_graph[node_index].clone();
-        node_indices.insert(node_label, node_index);
-    }
-
-    let mut edges = HashMap::new();
-    for edge_index in initial_blockchain_graph.edge_indices() {
-        let edge_weight = initial_blockchain_graph[edge_index].clone();
-        edges.insert(edge_weight.hash.clone(), edge_weight);
-    }
-
-    recursive_graph_traversion(
-        0,
-        &mut initial_blockchain_graph,
-        &mut node_indices,
-        &mut edges,
-        &client,
-        api_key,
-        starting_adresses,
-    )
-    .await;
-
-    initial_blockchain_graph
-}
-
+    
 fn serialize_graph(graph: &G, pathname: &str) -> Result<()> {
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
@@ -230,10 +217,9 @@ fn serialize_graph(graph: &G, pathname: &str) -> Result<()> {
     }
 
     let serializable_graph = SerializableGraph { nodes, edges };
-    fs::create_dir_all(DATA_STORAGE_FOLDER).unwrap();
     let file_pathname = format!("{}/{}", DATA_STORAGE_FOLDER, pathname);
-    let file = File::create(&file_pathname).unwrap();
-    serde_json::to_writer_pretty(file, &serializable_graph).unwrap();
+    let file = File::create(&file_pathname)?;
+    serde_json::to_writer_pretty(file, &serializable_graph)?;
 
     println!("\nSaved graph with {} edges and {} nodes as {}\n", &graph.edge_count(), &graph.node_count(), &file_pathname);
     Ok(())
@@ -479,15 +465,18 @@ fn test_main() ->Result<(), ()> {
 }
 
 fn main() {  
-    let timer: Instant = Instant::now();
+    let async_timer: Instant = Instant::now();
     let api_key = get_api_key();
     let rt = Runtime::new().unwrap();
-    let initial_graph = Graph::<String, SimplifiedTransaction, Directed>::new();
-    let graph = rt.block_on(parse_blockchain(initial_graph, &api_key));
-    
-    println!("Async operations took {:.3} s", timer.elapsed().as_secs_f64());
-    let mut main_log = String::new();
-    serialize_graph(&graph, "parsed.json").unwrap(); 
+    let graph = rt.block_on(parse_blockchain(TRAVERSAL_STARTING_ADDRESS.to_string(), &api_key));
+
+    println!("Async operations took {:.3} s", async_timer.elapsed().as_secs_f64());
+    let timer: Instant = Instant::now();
+
+    let mut result_log = String::new();
+
+    let _ = serialize_graph(&graph, "parsed.json");
+
     let prices = get_eth_hourly_prices("eth_prices.csv").unwrap();
 
     let (graph_volume, graph_mean) = calculate_total_usd_volume(&graph, &prices);
@@ -496,7 +485,7 @@ fn main() {
         graph_volume, graph_mean, graph.edge_count()
     );
     print!("{}", &s);
-    main_log.push_str(&s);
+    result_log.push_str(&s);
 
     // Price filtered graph
     let usd_lower_bound = 10.0;
@@ -508,7 +497,7 @@ fn main() {
         usd_lower_bound, usd_higher_bound, price_filtered_graph_volume, price_filtered_graph_mean, price_filtered_graph.edge_count()
     );
     print!("{}", &s);
-    main_log.push_str(&s);   
+    result_log.push_str(&s);   
 
     // Two-way filtered graph
     let twoway_filtered_graph = filter_twoway_edges(&graph);
@@ -518,7 +507,7 @@ fn main() {
         twoway_filtered_graph_volume, twoway_filtered_graph_mean_value, twoway_filtered_graph_flow, twoway_filtered_graph.edge_count()
     );
     print!("{}", &s);
-    main_log.push_str(&s);
+    result_log.push_str(&s);
     
     // Two-way and price filtered graph
     let twoway_price_filtered_graph = filter_twoway_edges(&price_filtered_graph);
@@ -528,10 +517,10 @@ fn main() {
         usd_lower_bound, usd_higher_bound, twoway_price_filtered_graph_volume, twoway_price_filtered_graph_mean_value, twoway_price_filtered_graph_flow, twoway_price_filtered_graph.edge_count()
     );
     print!("{}", &s);
-    main_log.push_str(&s);
+    result_log.push_str(&s);
 
-    let mut log_file_main= File::create("main_log.txt").unwrap();    
-    write!(log_file_main, "{}", main_log).unwrap();
+    let mut log_file_main= File::create("result.txt").unwrap();
+    write!(log_file_main, "{}", result_log).unwrap();
 
     let mut log_file_twoway = File::create("twoway_filtered_graph_logs.txt").unwrap();    
     let mut log_file_twoway_price = File::create("twoway_price_filtered_graph_logs.txt").unwrap();    
@@ -540,5 +529,6 @@ fn main() {
     log_file_twoway.write_all(twoway_filtered_graph_logs.as_bytes()).unwrap();
     log_file_twoway_price.write_all(twoway_price_filtered_graph_logs.as_bytes()).unwrap();
 
-    println!("Local + async operations took {:.3} s", timer.elapsed().as_secs_f64());
+    println!("Local operations took {:.3} s", timer.elapsed().as_secs_f64());
+    println!("Local + async operations took {:.3} s", async_timer.elapsed().as_secs_f64());
 }
