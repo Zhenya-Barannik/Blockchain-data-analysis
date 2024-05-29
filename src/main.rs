@@ -15,12 +15,12 @@ use std::time::Instant;
 struct TransactionResponse {
     status: String,
     message: String,
-    result: Vec<Transaction>,
+    result: Vec<RawTransaction>,
 }
 
 #[allow(dead_code, non_snake_case)]
 #[derive(Debug, Deserialize, Serialize, Clone)]
-struct Transaction {
+struct RawTransaction {
     blockHash: String,
     blockNumber: String,
     from: String,
@@ -42,9 +42,31 @@ struct Transaction {
     methodId: String,
 }
 
+#[allow(non_snake_case)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct SimplifiedTransaction {
+    hash: String,
+    value: String,
+    timeStamp: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SerializableGraph {
+    nodes: Vec<String>,
+    edges: Vec<(usize, usize, SimplifiedTransaction)>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EthPriceRecord {
+    unix_epoch_at_the_start_of_averaging_period: u64,
+    average_price_in_usd: f64,
+}
+
+type G = Graph<String, SimplifiedTransaction, Directed>;
+
 const TRAVERSAL_STARTING_ADDRESS: &str = "0x4976A4A02f38326660D17bf34b431dC6e2eb2327"; // Binance affiliated address
 const MAX_GRAPH_TRAVERSAL_DEPTH: usize = 4; // Depth of 1 will always be searched, so max depth of 0 is the same as max depth of 1.
-const MAX_TOTAL_TRANSACTIONS: usize = 100_000_000; // Limit of transactions at which parsing will be stopped.
+const MAX_TOTAL_TRANSACTIONS: usize = 20_000; // Limit of transactions at which parsing will be stopped.
 const MAX_TRANSACTIONS_FROM_EACH_ADDRESS: usize = 10_000; // Limit of transactions to parse (from and to) one particular address.
 const DATA_STORAGE_FOLDER: &str = "json";
 
@@ -63,7 +85,7 @@ async fn get_transactions_for_address(
         "https://api.etherscan.io/api?module=account&action=txlist&address={}&startblock={}&endblock={}&page={}&offset={}&sort={}&apikey={}",
         address, start_block, end_block, page, offset, sort, api_key
     );
-    let response = client.get(&request_url).send().await.unwrap();
+    let response = client.get(&request_url).send().await?;
 
     if response.status().is_success() {
         let body_bytes = response.bytes().await?;
@@ -84,9 +106,9 @@ async fn get_transactions_for_address(
 
 async fn recursive_graph_traversion(
     current_depth: usize,
-    blockchain_graph: &mut Graph<String, Transaction, Directed>,
+    blockchain_graph: &mut G,
     node_indices: &mut HashMap<String, NodeIndex>,
-    edges: &mut HashMap<String, Transaction>,
+    edges: &mut HashMap<String, SimplifiedTransaction>,
     client: &Client,
     api_key: &String,
     adresses_to_check: Vec<String>,
@@ -111,8 +133,16 @@ async fn recursive_graph_traversion(
         };
         for transaction in response.result.iter() {
             if transaction.contractAddress == "".to_string()
+            && transaction.isError == "0"
+            && transaction.from != "GENESIS" 
             && !edges.contains_key(&transaction.hash)
-            && transaction.from != "GENESIS" {
+            {
+                let simplified_transacion = SimplifiedTransaction {
+                    hash: transaction.hash.clone(),
+                    value: transaction.value.clone(),
+                    timeStamp: transaction.timeStamp.clone()
+                };
+            
                 let origin = *node_indices
                     .entry(transaction.from.clone())
                     .or_insert_with(|| {
@@ -126,8 +156,8 @@ async fn recursive_graph_traversion(
                         blockchain_graph.add_node(transaction.to.clone())
                     });
 
-                blockchain_graph.add_edge(origin, target, transaction.clone());
-                edges.insert(transaction.hash.clone(), transaction.clone());
+                edges.insert(transaction.hash.clone(), simplified_transacion.clone());
+                blockchain_graph.add_edge(origin, target, simplified_transacion);
                 println!(
                     "Added transaction {} --> {} at {} unix epoch",
                     &transaction.from.as_str(),
@@ -135,9 +165,6 @@ async fn recursive_graph_traversion(
                     transaction.timeStamp
                 );
             }
-            if  transaction.from == "GENESIS" {
-                println!("Genesis transaction skipped!")
-            };
         }
     }
 
@@ -159,7 +186,7 @@ async fn recursive_graph_traversion(
     }
 }
 
-async fn parse_blockchain(mut initial_blockchain_graph: Graph::<String, Transaction, Directed>, api_key: &String) -> Graph<String, Transaction> {
+async fn parse_blockchain(mut initial_blockchain_graph: Graph::<String, SimplifiedTransaction, Directed>, api_key: &String) -> Graph<String, SimplifiedTransaction> {
     let client = Client::new();
     let starting_adresses = vec![TRAVERSAL_STARTING_ADDRESS.to_string()];
 
@@ -189,13 +216,7 @@ async fn parse_blockchain(mut initial_blockchain_graph: Graph::<String, Transact
     initial_blockchain_graph
 }
 
-#[derive(Serialize, Deserialize)]
-struct SerializableGraph {
-    nodes: Vec<String>,
-    edges: Vec<(usize, usize, Transaction)>,
-}
-
-fn serialize_graph(graph: &Graph<String, Transaction, Directed>, pathname: &str) -> Result<()> {
+fn serialize_graph(graph: &G, pathname: &str) -> Result<()> {
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
 
@@ -220,7 +241,7 @@ fn serialize_graph(graph: &Graph<String, Transaction, Directed>, pathname: &str)
 
 
 #[allow(dead_code)]
-fn deserialize_graph(pathname: &str) -> Result<Graph<String, Transaction, Directed>> {
+fn deserialize_graph(pathname: &str) -> Result<G> {
     let file_pathname = format!("{}/{}", DATA_STORAGE_FOLDER, pathname);
     let mut json = String::new();
     
@@ -257,7 +278,7 @@ fn get_api_key() -> String {
     api_key
 }
 
-fn filter_twoway_edges(graph: &Graph<String, Transaction, Directed>) -> Graph<String, Transaction, Directed> {
+fn filter_twoway_edges(graph: &G) -> G {
     let mut filtered_graph = graph.clone();
     filtered_graph.clear_edges();
 
@@ -272,7 +293,7 @@ fn filter_twoway_edges(graph: &Graph<String, Transaction, Directed>) -> Graph<St
     filtered_graph
 }
 
-fn calculate_two_way_flow(graph: &Graph<String, Transaction, Directed>, prices: &Vec<Record>) -> (f64, f64, f64, String) {
+fn calculate_two_way_flow(graph: &G, prices: &Vec<EthPriceRecord>) -> (f64, f64, f64, String) {
     let mut detailed_log = String::new();
     let mut total_volume_usd = 0.0;
     let mut total_flow_usd = 0.0;
@@ -349,16 +370,7 @@ fn calculate_two_way_flow(graph: &Graph<String, Transaction, Directed>, prices: 
 }
 
 
-
-#[allow(dead_code)]
-#[derive(Debug, Deserialize)]
-struct Record {
-    unix_epoch_at_the_start_of_averaging_period: u64,
-    average_price_in_usd: f64,
-    symbol: String,
-}
-
-fn get_eth_hourly_prices(file_path: &str) -> Result<Vec<Record>> {
+fn get_eth_hourly_prices(file_path: &str) -> Result<Vec<EthPriceRecord>> {
     let mut reader = csv::Reader::from_path(file_path).unwrap();
     let mut records = Vec::new();
 
@@ -366,19 +378,17 @@ fn get_eth_hourly_prices(file_path: &str) -> Result<Vec<Record>> {
         let record = result.unwrap();
         let unix_epoch_at_the_start_of_averaging_period: u64 = record[0].parse::<f64>().unwrap().round() as u64;
         let average_price_in_usd: f64 = record[1].parse().unwrap();
-        let symbol = record[2].to_string();
 
-        records.push(Record {
+        records.push(EthPriceRecord {
             unix_epoch_at_the_start_of_averaging_period,
             average_price_in_usd,
-            symbol,
         });
     }
 
     Ok(records)
 }
 
-fn get_price_at_timestamp(timestamp: u64, prices: &Vec<Record>) -> f64 {
+fn get_price_at_timestamp(timestamp: u64, prices: &Vec<EthPriceRecord>) -> f64 {
     let maybe_price = prices.iter().find(|&price| {
         let period_start = price.unix_epoch_at_the_start_of_averaging_period as u64;
         let period_end = period_start + 3600;
@@ -399,12 +409,7 @@ fn get_price_at_timestamp(timestamp: u64, prices: &Vec<Record>) -> f64 {
 
 }
 
-fn filter_by_transaction_price(
-    graph: &Graph<String, Transaction, Directed>,
-    prices: &Vec<Record>,
-    lower_usd_bound: f64,
-    higher_usd_bound: f64
-) -> Graph<String, Transaction, Directed> {
+fn filter_by_transaction_price(graph: &G, prices: &Vec<EthPriceRecord>, lower_usd_bound: f64, higher_usd_bound: f64) -> G {
     let mut filtered_graph = graph.clone();
     filtered_graph.clear_edges();
 
@@ -421,7 +426,7 @@ fn filter_by_transaction_price(
     filtered_graph
 }
 
-fn calculate_total_usd_volume(graph: &Graph<String, Transaction, Directed>, prices: &Vec<Record>) -> (f64, f64) {
+fn calculate_total_usd_volume(graph: &G, prices: &Vec<EthPriceRecord>) -> (f64, f64) {
     let mut total_volume_usd = 0.0;
 
     for edge in graph.edge_references() {
@@ -477,7 +482,7 @@ fn main() {
     let timer: Instant = Instant::now();
     let api_key = get_api_key();
     let rt = Runtime::new().unwrap();
-    let initial_graph = Graph::<String, Transaction, Directed>::new();
+    let initial_graph = Graph::<String, SimplifiedTransaction, Directed>::new();
     let graph = rt.block_on(parse_blockchain(initial_graph, &api_key));
     
     println!("Async operations took {:.3} s", timer.elapsed().as_secs_f64());
