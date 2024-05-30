@@ -9,6 +9,8 @@ use std::fs::File;
 use std::io::{Write, Read};
 use std::collections::HashSet;
 use std::time::Instant;
+use priority_queue::PriorityQueue;
+
 
 #[allow(dead_code, non_snake_case)]
 #[derive(Debug, Deserialize)]
@@ -65,7 +67,7 @@ struct EthPriceRecord {
 type G = Graph<String, SimplifiedTransaction, Directed>;
 
 const TRAVERSAL_STARTING_ADDRESS: &str = "0x4976A4A02f38326660D17bf34b431dC6e2eb2327"; // Binance affiliated address
-const MAX_TRANSACTIONS_TO_PARSE: usize = 100_000_000; // Limit of transactions near which parsing will be stopped.
+const MAX_TRANSACTIONS_TO_PARSE: usize = 10_000_000; // Limit of transactions near which parsing will be stopped.
 const TRANSACTIONS_TO_REQUEST_FROM_EACH_ADDRESS: usize = 10_000; // Limit of transactions to request (from and to) one particular address, <= 10000
 const DATA_STORAGE_FOLDER: &str = "json";
 
@@ -104,7 +106,8 @@ async fn get_transactions_for_address(
 }
 
 async fn graph_data_collection_procedure(
-    address_relevance_counter: &mut HashMap<String, u64>,
+    address_priority_hashmap: &mut HashMap<String, u64>,
+    address_priority_pq: &mut PriorityQueue<String, i32>,
     blockchain_graph: &mut G,
     node_indices: &mut HashMap<String, NodeIndex>,
     edges: &mut HashMap<String, SimplifiedTransaction>,
@@ -121,22 +124,38 @@ async fn graph_data_collection_procedure(
                     println!("Incorrect response for {}:\n{}", &address_to_check, e);
                 }
                 Ok(t) => {
-                    println!("Correct response for {} with {} transactions", &address_to_check, t.result.len());
+                    // println!("Correct response for {} with {} transactions", &address_to_check, t.result.len());
                     break t;
                 }
             }
         }
     };
+    
+    let hm_timer: Instant = Instant::now();
+    for transaction in response.result.iter() {
+        *address_priority_hashmap.entry(transaction.to.clone()).or_insert(0) +=1; 
+        *address_priority_hashmap.entry(transaction.from.clone()).or_insert(0) +=1; 
+    }
+    println!("Editing priority addresses took     {:<9} mks (HashMap)", hm_timer.elapsed().as_micros());
+    
+    let pq_timer: Instant = Instant::now();
+    for transaction in response.result.iter() {
+        if !address_priority_pq.change_priority_by(&transaction.to, |x: &mut i32| { *x += 1 }){
+            address_priority_pq.push(transaction.to.clone(), 1);
+        }
+        if !address_priority_pq.change_priority_by(&transaction.from, |x: &mut i32| { *x += 1 }){
+            address_priority_pq.push(transaction.to.clone(), 1);
+        }
+    }
+    println!("Editing priority addresses took     {:<9} mks (PriorityQueue)", pq_timer.elapsed().as_micros());
+
 
     for transaction in response.result.iter() {
         if transaction.contractAddress == "".to_string()
         && transaction.isError == "0"
         && transaction.from != "GENESIS" 
         && !edges.contains_key(&transaction.hash)
-        {
-            *address_relevance_counter.entry(transaction.to.clone()).or_insert(0) +=1; // Counting to find the best direction to move futher
-            *address_relevance_counter.entry(transaction.from.clone()).or_insert(0) +=1; // Counting to find the best direction to move futher 
-
+        {   
             let simplified_transacion = SimplifiedTransaction {
                 hash: transaction.hash.clone(),
                 value: transaction.value.clone(),
@@ -162,55 +181,72 @@ async fn graph_data_collection_procedure(
 
 }
 
-async fn parse_blockchain(traversal_starting_adress: String, api_key: &String) -> Graph<String, SimplifiedTransaction> {
+async fn parse_blockchain(path_starting_address: String, api_key: &String) -> Graph<String, SimplifiedTransaction> {
     let client = Client::new();
     let mut blockchain_graph: Graph::<String, SimplifiedTransaction, Directed> = Graph::new();
     let mut node_indices = HashMap::new();
     let mut edges = HashMap::new();
 
-    let mut address_relevance_counter: HashMap<String, u64> = HashMap::from([(traversal_starting_adress.clone().to_lowercase(), 1)]);
-    let mut trajectory: Vec<String> = vec![];
-    
+    let mut path_history: Vec<String> = vec![];
+    let mut path_priority_h: HashMap<String, u64> = HashMap::from([(path_starting_address.clone().to_lowercase(), 1)]);
+    let mut path_priority_pq:PriorityQueue<String, i32> = PriorityQueue::new();
+    path_priority_pq.push(path_starting_address.clone().to_lowercase(), 1);
+
     loop {
-        let current_edge_count = blockchain_graph.edge_count();
-        println!("Current transaction count is {} out of {}", current_edge_count, MAX_TRANSACTIONS_TO_PARSE);
-        if current_edge_count >= MAX_TRANSACTIONS_TO_PARSE {return blockchain_graph};
         
-        let mut counts: Vec<(String, u64)> = address_relevance_counter.clone()
-            .into_iter()
-            .map(|(k, v)| (k.clone(), v))
-            .collect();
-            counts.sort_by(|a, b| b.1.cmp(&a.1));
-        
-        let priority_address = counts
+        let hm_timer: Instant = Instant::now();
+        let mut counts: Vec<(String, u64)> = path_priority_h.clone()
+        .into_iter()
+        .map(|(k, v)| (k.clone(), v))
+        .collect();
+    counts.sort_by(|a, b| b.1.cmp(&a.1));
+        let next_address = counts
             .iter()
             .map(|(address, _)| address.clone())
-            .find(|address| !trajectory.contains(address))
+            .find(|address| !path_history.contains(address))
             .unwrap();
+        println!("Searching for the next address took {:<9} mks (HashMap)", hm_timer.elapsed().as_micros());
         
-            trajectory.push(priority_address.clone());
-
-            let future = graph_data_collection_procedure(
-                &mut address_relevance_counter,
+        let pq_timer: Instant = Instant::now();
+        let next_address = loop {
+            if let Some((address, _priority)) = path_priority_pq.pop() {
+                if !path_history.contains(&address) {
+                    break address;
+                }
+            } else {
+                panic!("No valid next address found");
+            }
+        };
+        println!("Searching for the next address took {:<9} mks (PriorityQueue)", pq_timer.elapsed().as_micros());
+        
+        path_history.push(next_address.clone());
+        
+        let future = graph_data_collection_procedure(
+            &mut path_priority_h,
+                &mut path_priority_pq,
                 &mut blockchain_graph,
                 &mut node_indices,
                 &mut edges,
                 &client, 
                 api_key,
-                priority_address,
+                next_address.clone(),
             );
             future.await;
+
+            let current_edge_count = blockchain_graph.edge_count();
+            if current_edge_count >= MAX_TRANSACTIONS_TO_PARSE {return blockchain_graph};
+            println!("Added data for {}. Transaction count is {} / {}", next_address, current_edge_count, MAX_TRANSACTIONS_TO_PARSE);
         }
-    }
+}
     
-fn serialize_graph(graph: &G, pathname: &str) -> Result<()> {
+    fn serialize_graph(graph: &G, pathname: &str) -> Result<()> {
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
-
+    
     for node in graph.node_indices() {
         nodes.push(graph[node].clone());
     }
-
+    
     for edge in graph.edge_indices() {
         let (source, target) = graph.edge_endpoints(edge).unwrap();
         edges.push((source.index(), target.index(), graph[edge].clone()));
