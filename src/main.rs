@@ -4,13 +4,14 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::runtime::Runtime;
-use petgraph::Graph;
+use petgraph::{graph, Graph};
 use std::fs::File;
 use std::io::{Write, Read};
 use std::collections::HashSet;
 use std::time::Instant;
 use priority_queue::PriorityQueue;
-
+use plotters::{coord::Shift, prelude::*};
+use core::cmp::min;
 
 #[allow(dead_code, non_snake_case)]
 #[derive(Debug, Deserialize)]
@@ -67,7 +68,7 @@ struct EthPriceRecord {
 type G = Graph<String, SimplifiedTransaction, Directed>;
 
 const TRAVERSAL_STARTING_ADDRESS: &str = "0x4976A4A02f38326660D17bf34b431dC6e2eb2327"; // Binance affiliated address
-const MAX_TRANSACTIONS_TO_PARSE: usize = 10_000_000; // Limit of transactions near which parsing will be stopped.
+const MAX_TRANSACTIONS_TO_PARSE: usize = 100_000; // Limit of transactions near which parsing will be stopped.
 const TRANSACTIONS_TO_REQUEST_FROM_EACH_ADDRESS: usize = 10_000; // Limit of transactions to request (from and to) one particular address, <= 10000
 const DATA_STORAGE_FOLDER: &str = "json";
 
@@ -106,7 +107,6 @@ async fn get_transactions_for_address(
 }
 
 async fn graph_data_collection_procedure(
-    address_priority_hashmap: &mut HashMap<String, u64>,
     address_priority_pq: &mut PriorityQueue<String, i32>,
     blockchain_graph: &mut G,
     node_indices: &mut HashMap<String, NodeIndex>,
@@ -124,60 +124,51 @@ async fn graph_data_collection_procedure(
                     println!("Incorrect response for {}:\n{}", &address_to_check, e);
                 }
                 Ok(t) => {
-                    // println!("Correct response for {} with {} transactions", &address_to_check, t.result.len());
+                    println!("Correct response for {} with {} transactions", &address_to_check, t.result.len());
                     break t;
                 }
             }
         }
     };
     
-    let hm_timer: Instant = Instant::now();
-    for transaction in response.result.iter() {
-        *address_priority_hashmap.entry(transaction.to.clone()).or_insert(0) +=1; 
-        *address_priority_hashmap.entry(transaction.from.clone()).or_insert(0) +=1; 
-    }
-    println!("Editing priority addresses took     {:<9} mks (HashMap)", hm_timer.elapsed().as_micros());
-    
-    let pq_timer: Instant = Instant::now();
-    for transaction in response.result.iter() {
-        if !address_priority_pq.change_priority_by(&transaction.to, |x: &mut i32| { *x += 1 }){
-            address_priority_pq.push(transaction.to.clone(), 1);
-        }
-        if !address_priority_pq.change_priority_by(&transaction.from, |x: &mut i32| { *x += 1 }){
-            address_priority_pq.push(transaction.to.clone(), 1);
-        }
-    }
-    println!("Editing priority addresses took     {:<9} mks (PriorityQueue)", pq_timer.elapsed().as_micros());
 
-
+    let pq_timer: Instant = Instant::now();    
     for transaction in response.result.iter() {
         if transaction.contractAddress == "".to_string()
         && transaction.isError == "0"
         && transaction.from != "GENESIS" 
         && !edges.contains_key(&transaction.hash)
         {   
+            if !address_priority_pq.change_priority_by(&transaction.to, |x: &mut i32| { *x += 1 }){
+                address_priority_pq.push(transaction.to.clone(), 1);
+            }
+            if !address_priority_pq.change_priority_by(&transaction.from, |x: &mut i32| { *x += 1 }){
+                address_priority_pq.push(transaction.to.clone(), 1);
+            }
+            
             let simplified_transacion = SimplifiedTransaction {
                 hash: transaction.hash.clone(),
                 value: transaction.value.clone(),
                 timeStamp: transaction.timeStamp.clone()
             };
-        
+            
             let origin = *node_indices
-                .entry(transaction.from.clone())
-                .or_insert_with(|| {
-                    blockchain_graph.add_node(transaction.from.clone())
-                });
+            .entry(transaction.from.clone())
+            .or_insert_with(|| {
+                blockchain_graph.add_node(transaction.from.clone())
+            });
 
             let target = *node_indices
-                .entry(transaction.to.clone())
-                .or_insert_with(|| {
-                    blockchain_graph.add_node(transaction.to.clone())
+            .entry(transaction.to.clone())
+            .or_insert_with(|| {
+                blockchain_graph.add_node(transaction.to.clone())
                 });
 
             edges.insert(transaction.hash.clone(), simplified_transacion.clone());
             blockchain_graph.add_edge(origin, target, simplified_transacion);
         }
     }
+    println!("Editing priority addresses and graph manipulation took {:<9} mks (PriorityQueue)", pq_timer.elapsed().as_micros());
 
 }
 
@@ -188,41 +179,20 @@ async fn parse_blockchain(path_starting_address: String, api_key: &String) -> Gr
     let mut edges = HashMap::new();
 
     let mut path_history: Vec<String> = vec![];
-    let mut path_priority_h: HashMap<String, u64> = HashMap::from([(path_starting_address.clone().to_lowercase(), 1)]);
     let mut path_priority_pq:PriorityQueue<String, i32> = PriorityQueue::new();
     path_priority_pq.push(path_starting_address.clone().to_lowercase(), 1);
 
     loop {
-        
-        let hm_timer: Instant = Instant::now();
-        let mut counts: Vec<(String, u64)> = path_priority_h.clone()
-        .into_iter()
-        .map(|(k, v)| (k.clone(), v))
-        .collect();
-    counts.sort_by(|a, b| b.1.cmp(&a.1));
-        let next_address = counts
-            .iter()
-            .map(|(address, _)| address.clone())
-            .find(|address| !path_history.contains(address))
-            .unwrap();
-        println!("Searching for the next address took {:<9} mks (HashMap)", hm_timer.elapsed().as_micros());
-        
         let pq_timer: Instant = Instant::now();
         let next_address = loop {
-            if let Some((address, _priority)) = path_priority_pq.pop() {
-                if !path_history.contains(&address) {
-                    break address;
-                }
-            } else {
-                panic!("No valid next address found");
-            }
+            let (a, _) = path_priority_pq.pop().unwrap();
+                if !path_history.contains(&a) {break a;}
         };
         println!("Searching for the next address took {:<9} mks (PriorityQueue)", pq_timer.elapsed().as_micros());
         
         path_history.push(next_address.clone());
         
         let future = graph_data_collection_procedure(
-            &mut path_priority_h,
                 &mut path_priority_pq,
                 &mut blockchain_graph,
                 &mut node_indices,
@@ -235,7 +205,7 @@ async fn parse_blockchain(path_starting_address: String, api_key: &String) -> Gr
 
             let current_edge_count = blockchain_graph.edge_count();
             if current_edge_count >= MAX_TRANSACTIONS_TO_PARSE {return blockchain_graph};
-            println!("Added data for {}. Transaction count is {} / {}", next_address, current_edge_count, MAX_TRANSACTIONS_TO_PARSE);
+            println!("Transaction count is {} / {}", current_edge_count, MAX_TRANSACTIONS_TO_PARSE);
         }
 }
     
@@ -463,6 +433,62 @@ fn calculate_total_usd_volume(graph: &G, prices: &Vec<EthPriceRecord>) -> (f64, 
     (total_volume_usd, mean_value_usd)
 }
 
+fn plot_distribution(graph: &G, prices: &Vec<EthPriceRecord>, root: &mut DrawingArea<BitMapBackend<'_>, Shift>, min_log_value: f64, description: &str) {
+    let transaction_log_values = graph
+    .raw_edges()
+    .iter()
+    .map(|t|
+        get_price_at_timestamp(t.weight.timeStamp.parse().unwrap(), &prices)
+            * (t.weight.value.parse::<f64>().unwrap()) / 1e18
+        )
+    .map(|v| f64::log10(v))
+    .collect::<Vec<f64>>();
+        
+    let max_log_value = transaction_log_values
+        .iter()
+        .max_by(|a, b| a.partial_cmp(b).unwrap())
+        .unwrap_or(&2.0)
+        .clone();
+
+    let bucket_count = 200;
+    let bucket_width = (max_log_value-min_log_value) / bucket_count as f64;
+    let mut buckets: Vec<u32> = vec![0u32; bucket_count];
+
+    for log_value in transaction_log_values.iter() {
+        let bucket_index = min((((log_value - min_log_value) / (max_log_value - min_log_value)) * (bucket_count as f64)).floor() as usize, bucket_count - 1);
+        buckets[bucket_index] += 1;
+    }
+    
+    let max_count = buckets.clone()[1..].iter().max().unwrap().clone(); // slicing to skip 0-valued transactions
+    let mut rectangles_to_draw = vec![];
+    
+    for (bucket_index, &count) in buckets.iter().enumerate() {
+        let bar_left = min_log_value + bucket_index as f64 * bucket_width;
+        let bar_right = bar_left + bucket_width;
+        let bar_top = ((count as f64 / max_count as f64) * max_count as f64) as u32;
+
+            rectangles_to_draw.push(
+                Rectangle::new(
+                    [(bar_left, 0), (bar_right, bar_top)],
+                    BLUE.filled()
+                )
+            );
+    }
+    
+    root.fill(&WHITE).unwrap();
+    let mut chart = ChartBuilder::on(&root)
+    .margin(5)
+    .caption(description, ("sans-serif", 20))
+    .x_label_area_size(40)
+    .y_label_area_size(40)
+    .build_cartesian_2d(min_log_value..max_log_value, 0..max_count)
+    .unwrap();
+    chart.configure_mesh().x_desc("log10(value in USD), at the moment of transaction").y_desc("N").draw().unwrap();
+    
+    chart.draw_series(rectangles_to_draw).unwrap();
+    root.present().unwrap();
+}
+
 #[test]
 fn test_main() ->Result<(), ()> {  
     let graph = deserialize_graph("handcrafted_for_testing.json").unwrap();
@@ -505,14 +531,11 @@ fn main() {
     let api_key = get_api_key();
     let rt = Runtime::new().unwrap();
     let graph = rt.block_on(parse_blockchain(TRAVERSAL_STARTING_ADDRESS.to_string(), &api_key));
-
     println!("Async operations took {:.3} s", async_timer.elapsed().as_secs_f64());
     let timer: Instant = Instant::now();
-
     let mut result_log = String::new();
-
-    let _ = serialize_graph(&graph, "parsed.json");
-
+    let _ = serialize_graph(&graph, "parsed.json").unwrap();
+    
     let prices = get_eth_hourly_prices("eth_prices.csv").unwrap();
 
     let (graph_volume, graph_mean) = calculate_total_usd_volume(&graph, &prices);
@@ -522,6 +545,8 @@ fn main() {
     );
     print!("{}", &s);
     result_log.push_str(&s);
+    let mut graph_root = BitMapBackend::new(&"main_graph.png", (720, 480)).into_drawing_area();
+    plot_distribution(&graph, &prices, &mut graph_root, 0.0, "Ethereum transaction value distribution (for all parsed transactions)");
 
     // Price filtered graph
     let usd_lower_bound = 10.0;
@@ -533,7 +558,9 @@ fn main() {
         usd_lower_bound, usd_higher_bound, price_filtered_graph_volume, price_filtered_graph_mean, price_filtered_graph.edge_count()
     );
     print!("{}", &s);
-    result_log.push_str(&s);   
+    result_log.push_str(&s);
+    let mut price_filtered_graph_root = BitMapBackend::new(&"price_filtered_graph.png", (720, 480)).into_drawing_area();
+    plot_distribution(&price_filtered_graph, &prices, &mut price_filtered_graph_root, 1.0, "Ethereum transaction value distribution (for transactions in the 10-1000 USD range)");
 
     // Two-way filtered graph
     let twoway_filtered_graph = filter_twoway_edges(&graph);
@@ -544,6 +571,8 @@ fn main() {
     );
     print!("{}", &s);
     result_log.push_str(&s);
+    let mut twoway_filtered_graph_root = BitMapBackend::new(&"twoway_filtered_graph.png", (720, 480)).into_drawing_area();
+    plot_distribution(&twoway_filtered_graph, &prices, &mut twoway_filtered_graph_root, 0.0, "Ethereum transaction value distribution (for two-way transactions)");   
     
     // Two-way and price filtered graph
     let twoway_price_filtered_graph = filter_twoway_edges(&price_filtered_graph);
@@ -554,6 +583,8 @@ fn main() {
     );
     print!("{}", &s);
     result_log.push_str(&s);
+    let mut twoway_price_filtered_graph_root = BitMapBackend::new(&"twoway_price_filtered_graph.png", (720, 480)).into_drawing_area();
+    plot_distribution(&twoway_price_filtered_graph, &prices, &mut twoway_price_filtered_graph_root, 1.0, "Ethereum transaction value distribution (for two-way transactions in the 10-1000 USD range)");
 
     let mut log_file_main= File::create("result.txt").unwrap();
     write!(log_file_main, "{}", result_log).unwrap();
