@@ -49,8 +49,15 @@ struct RawTransaction {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct SimplifiedTransaction {
     hash: String,
-    value: String,
-    timeStamp: String,
+    usdt_value: f64,
+    transfer_function: TransferFunction
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+enum TransferFunction {
+    Transfer,
+    TransferFrom,
+    None
 }
 
 #[derive(Serialize, Deserialize)]
@@ -59,15 +66,10 @@ struct SerializableGraph {
     edges: Vec<(usize, usize, SimplifiedTransaction)>,
 }
 
-#[derive(Debug, Deserialize)]
-struct EthPriceRecord {
-    unix_epoch_at_the_start_of_averaging_period: u64,
-    average_price_in_usd: f64,
-}
 
 type G = Graph<String, SimplifiedTransaction, Directed>;
 
-const TRAVERSAL_STARTING_ADDRESS: &str = "0x4976A4A02f38326660D17bf34b431dC6e2eb2327"; // Binance affiliated address
+const TRAVERSAL_STARTING_ADDRESS: &str = "0x21a31ee1afc51d94c2efccaa2092ad1028285549"; // Binance affiliated address
 const MAX_TRANSACTIONS_TO_PARSE: usize = 100_000; // Limit of transactions near which parsing will be stopped.
 const TRANSACTIONS_TO_REQUEST_FROM_EACH_ADDRESS: usize = 10_000; // Limit of transactions to request (from and to) one particular address, <= 10000
 const DATA_STORAGE_FOLDER: &str = "json";
@@ -132,7 +134,7 @@ async fn graph_data_collection_procedure(
     };
     
 
-    let pq_timer: Instant = Instant::now();    
+    let pq_timer: Instant = Instant::now();
     for transaction in response.result.iter() {
         if transaction.contractAddress == "".to_string()
         && transaction.isError == "0"
@@ -143,29 +145,105 @@ async fn graph_data_collection_procedure(
                 address_priority_pq.push(transaction.to.clone(), 1);
             }
             if !address_priority_pq.change_priority_by(&transaction.from, |x: &mut i32| { *x += 1 }){
-                address_priority_pq.push(transaction.to.clone(), 1);
+                address_priority_pq.push(transaction.from.clone(), 1);
             }
-            
-            let simplified_transacion = SimplifiedTransaction {
-                hash: transaction.hash.clone(),
-                value: transaction.value.clone(),
-                timeStamp: transaction.timeStamp.clone()
-            };
-            
-            let origin = *node_indices
-            .entry(transaction.from.clone())
-            .or_insert_with(|| {
-                blockchain_graph.add_node(transaction.from.clone())
-            });
+        
+            if transaction.value == "0".to_string() {
 
-            let target = *node_indices
-            .entry(transaction.to.clone())
-            .or_insert_with(|| {
-                blockchain_graph.add_node(transaction.to.clone())
-                });
+                if transaction.functionName == "transfer(address _to, uint256 _value)".to_string()
+                && transaction.methodId == "0xa9059cbb".to_string()
+                && transaction.to == "0xdac17f958d2ee523a2206206994597c13d831ec7".to_string()
+                {
+                    assert!(transaction.input.len() >= 138);
+                    assert_eq!((transaction.input.len() - 10) % 64, 0);
+                    assert_eq!(&transaction.input[0..10], "0xa9059cbb");
+                    
+                    let real_transaction_destination = transaction.input[10..74].to_string(); // Real transaction destination
+                    let value_in_usdt_u256 = primitive_types::U256::from_str_radix(&transaction.input[74..138], 16).unwrap();
+                    let value_in_usdt = value_in_usdt_u256.as_u64().as_f64() / 1E6;
+    
+                    let simplified_transaction = SimplifiedTransaction {
+                        hash: transaction.hash.clone(),
+                        usdt_value: value_in_usdt,
+                        transfer_function: TransferFunction::Transfer,
+                    };
+                    
+                    let origin = *node_indices
+                    .entry(transaction.from.clone())
+                    .or_insert_with(|| {
+                        blockchain_graph.add_node(transaction.from.clone())
+                    });
+    
+                    let target = *node_indices
+                    .entry(real_transaction_destination.clone())
+                    .or_insert_with(|| {
+                        blockchain_graph.add_node(real_transaction_destination.clone())
+                        });
+    
+                    edges.insert(transaction.hash.clone(), simplified_transaction.clone());
+                    blockchain_graph.add_edge(origin, target, simplified_transaction);
+                }
+                else if transaction.functionName == "transferFrom(address _from, address _to, uint256 _value)".to_string()
+                && transaction.methodId == "0x23b872dd".to_string()
+                && transaction.to == "0xdac17f958d2ee523a2206206994597c13d831ec7".to_string()
+                {
+                    assert!(transaction.input.len() >= 202);
+                    assert_eq!((transaction.input.len() - 10) % 64, 0);
+                    assert_eq!(&transaction.input[0..10], "0x23b872dd");
 
-            edges.insert(transaction.hash.clone(), simplified_transacion.clone());
-            blockchain_graph.add_edge(origin, target, simplified_transacion);
+                    let real_transaction_source = transaction.input[10..74].to_string(); // Real transaction destination
+                    let real_transaction_destination = transaction.input[74..138].to_string(); // Real transaction destination
+                    let value_in_usdt_u256 = primitive_types::U256::from_str_radix(&transaction.input[138..202], 16).unwrap();
+                    let value_in_usdt = value_in_usdt_u256.as_u64().as_f64() / 1E6;
+    
+                    let simplified_transaction = SimplifiedTransaction {
+                        hash: transaction.hash.clone(),
+                        usdt_value: value_in_usdt,
+                        transfer_function: TransferFunction::TransferFrom,
+                    };
+                    
+                    let origin = *node_indices
+                    .entry(real_transaction_source.clone())
+                    .or_insert_with(|| {
+                        blockchain_graph.add_node(real_transaction_source.clone())
+                    });
+    
+                    let target = *node_indices
+                    .entry(real_transaction_destination.clone())
+                    .or_insert_with(|| {
+                        blockchain_graph.add_node(real_transaction_destination.clone())
+                        });
+    
+                    edges.insert(transaction.hash.clone(), simplified_transaction.clone());
+                    blockchain_graph.add_edge(origin, target, simplified_transaction);
+
+                } else {
+                    let simplified_transacion = SimplifiedTransaction {
+                        hash: transaction.hash.clone(),
+                        usdt_value: 0.0,
+                        transfer_function: TransferFunction::None,
+                    };
+    
+                    let origin = *node_indices
+                    .entry(transaction.from.clone())
+                    .or_insert_with(|| {
+                        blockchain_graph.add_node(transaction.from.clone())
+                    });
+    
+                    // WARNING: The "target" may end up being not a real transaction destination, but a contract address.
+                    // Can't know this in all cases because this is ca atch-all branch for NOT-USDT transactions with 0 value.
+                    // Current I need only to count transactions, so the contract address will okay,
+                    // Hash will be unique anyway.
+                    let target = *node_indices 
+                    .entry(transaction.to.clone())
+                    .or_insert_with(|| {
+                        blockchain_graph.add_node(transaction.to.clone())
+                    });
+    
+                    edges.insert(transaction.hash.clone(), simplified_transacion.clone());
+                    blockchain_graph.add_edge(origin, target, simplified_transacion);
+                }
+            }
         }
     }
     println!("Editing priority addresses and graph manipulation took {:<9} mks (PriorityQueue)", pq_timer.elapsed().as_micros());
@@ -270,147 +348,14 @@ fn get_api_key() -> String {
     api_key
 }
 
-fn filter_twoway_edges(graph: &G) -> G {
-    let mut filtered_graph = graph.clone();
-    filtered_graph.clear_edges();
 
-    for edge in graph.edge_references() {
-        let (source, target) = (edge.source(), edge.target());
-        if graph.find_edge(target, source).is_some() {
-            let transaction = edge.weight().clone();
-            filtered_graph.add_edge(source, target, transaction);
-        }
-    }
-
-    filtered_graph
-}
-
-fn calculate_two_way_flow(graph: &G, prices: &Vec<EthPriceRecord>) -> (f64, f64, f64, String) {
-    let mut detailed_log = String::new();
-    let mut total_volume_usd = 0.0;
-    let mut total_flow_usd = 0.0;
-
-    let mut visited_pairs = HashSet::new();
-    for first_edge in graph.edge_references() {
-        let node_a = first_edge.source();
-        let node_b = first_edge.target();
-
-        if visited_pairs.contains(&(node_a, node_b)) {continue}
-
-        let mut pair_volume_usd = 0.0;
-        let mut sum_a_to_b_usd = 0.0;
-        let mut sum_b_to_a_usd = 0.0;
-        
-        let edges_a_to_b = graph.edges_connecting(node_a, node_b).count();
-        let edges_b_to_a = graph.edges_connecting(node_b, node_a).count();
-        let edges_info: String = if node_a != node_b {
-                format!("{} + {}", edges_a_to_b, edges_b_to_a)
-            } else {             
-                format!("{} self", edges_a_to_b)
-            };
-        
-        detailed_log.push_str(&format!(
-            "Two-way transaction set for addresses {:?} <-> {:?} ({}):\n",
-            &graph[node_a], &graph[node_b], &edges_info
-        ));
-
-        for edge in graph.edges(node_a) {
-            if edge.target() == node_b {
-                let volume_wei: f64 = edge.weight().value.parse().unwrap();
-                let timestamp: u64 = edge.weight().timeStamp.parse().unwrap();
-                let volume_in_usd = (volume_wei / 1e18) * get_price_at_timestamp(timestamp, prices);
-                pair_volume_usd += volume_in_usd;
-                sum_a_to_b_usd += volume_in_usd;
-                detailed_log.push_str(&format!("      |-> hash: {} at {} unix epoch, volume: {:.0} USD\n", &edge.weight().hash, timestamp, volume_in_usd));
-            }
-        }
-
-        if node_a != node_b { 
-            for edge in graph.edges(node_b) {
-                if edge.target() == node_a {
-                    let volume_wei: f64 = edge.weight().value.parse().unwrap();
-                    let timestamp: u64 = edge.weight().timeStamp.parse().unwrap();
-                    let volume_in_usd = (volume_wei / 1e18) * get_price_at_timestamp(timestamp, prices);
-                    pair_volume_usd += volume_in_usd;
-                    sum_b_to_a_usd += volume_in_usd;
-                    detailed_log.push_str(&format!("      <-| hash: {} at {} unix epoch, volume: {:.0} USD\n", &edge.weight().hash, timestamp, volume_in_usd));
-                }
-            }
-        } 
-        let pair_flow_usd = if node_a != node_b {
-            (sum_a_to_b_usd - sum_b_to_a_usd).abs()
-        } else {
-            0.0
-        };
-        total_volume_usd += pair_volume_usd;
-        total_flow_usd += pair_flow_usd;
-
-        visited_pairs.insert((node_a, node_b));
-        visited_pairs.insert((node_b, node_a));
-
-        detailed_log.push_str(&format!(
-            "Volume for this set: {:.0} USD, Flow for this set: {:.0} USD\n\n",
-            pair_volume_usd, pair_flow_usd
-        ));
-
-    }
-
-    detailed_log.push_str(&format!("Total volume: {:.0} USD\n", total_volume_usd));
-    detailed_log.push_str(&format!("Total flow: {:.0} USD\n", total_flow_usd));
-
-    (total_volume_usd, total_volume_usd/graph.edge_count() as f64, total_flow_usd, detailed_log)
-}
-
-
-fn get_eth_hourly_prices(file_path: &str) -> Result<Vec<EthPriceRecord>> {
-    let mut reader = csv::Reader::from_path(file_path).unwrap();
-    let mut records = Vec::new();
-
-    for result in reader.records() {
-        let record = result.unwrap();
-        let unix_epoch_at_the_start_of_averaging_period: u64 = record[0].parse::<f64>().unwrap().round() as u64;
-        let average_price_in_usd: f64 = record[1].parse().unwrap();
-
-        records.push(EthPriceRecord {
-            unix_epoch_at_the_start_of_averaging_period,
-            average_price_in_usd,
-        });
-    }
-
-    Ok(records)
-}
-
-fn get_price_at_timestamp(timestamp: u64, prices: &Vec<EthPriceRecord>) -> f64 {
-    let maybe_price = prices.iter().find(|&price| {
-        let period_start = price.unix_epoch_at_the_start_of_averaging_period as u64;
-        let period_end = period_start + 3600;
-        period_start <= timestamp && timestamp < period_end
-    }).map(|price| price.average_price_in_usd);
-
-    match maybe_price {
-        Some(price) => price,
-        None => {
-            let last_record = prices.iter()
-            .max_by(|record_a, record_b| record_a.unix_epoch_at_the_start_of_averaging_period.cmp(&record_b.unix_epoch_at_the_start_of_averaging_period));
-            let last_timestamp = last_record.unwrap().unix_epoch_at_the_start_of_averaging_period;
-            let last_price = last_record.unwrap().average_price_in_usd;
-
-            if timestamp > last_timestamp {last_price} else {panic!("No price found")}
-        }
-    }
-
-}
-
-fn filter_by_transaction_price(graph: &G, prices: &Vec<EthPriceRecord>, lower_usd_bound: f64, higher_usd_bound: f64) -> G {
+fn filter_by_transaction_price(graph: &G, lower_usd_bound: f64, higher_usd_bound: f64) -> G {
     let mut filtered_graph = graph.clone();
     filtered_graph.clear_edges();
 
     for edge in graph.edge_references() {
         let transaction = edge.weight();
-        let timestamp: u64 = transaction.timeStamp.parse().unwrap();
-        let eth_price = get_price_at_timestamp(timestamp, prices);
-        let transaction_value_in_usd = (transaction.value.parse::<f64>().unwrap() / 1e18) * eth_price;
-        if lower_usd_bound <= transaction_value_in_usd && transaction_value_in_usd <= higher_usd_bound {
+        if lower_usd_bound <=  transaction.usdt_value &&  transaction.usdt_value <= higher_usd_bound {
             filtered_graph.add_edge(edge.source(), edge.target(), transaction.clone());
         }
     }
@@ -418,30 +363,25 @@ fn filter_by_transaction_price(graph: &G, prices: &Vec<EthPriceRecord>, lower_us
     filtered_graph
 }
 
-fn calculate_total_usd_volume(graph: &G, prices: &Vec<EthPriceRecord>) -> (f64, f64) {
+fn calculate_total_usd_volume(graph: &G) -> (f64, f64) {
     let mut total_volume_usd = 0.0;
 
     for edge in graph.edge_references() {
         let transaction = edge.weight();
-        let timestamp: u64 = transaction.timeStamp.parse().unwrap();
-        let eth_price = get_price_at_timestamp(timestamp, prices);
-        let transaction_value_in_usd = (transaction.value.parse::<f64>().unwrap() / 1e18) * eth_price;
-        total_volume_usd += transaction_value_in_usd;
+        total_volume_usd += transaction.usdt_value;
     }
     let mean_value_usd = total_volume_usd / graph.edge_count() as f64;
 
     (total_volume_usd, mean_value_usd)
 }
 
-fn plot_distribution(graph: &G, prices: &Vec<EthPriceRecord>, root: &mut DrawingArea<BitMapBackend<'_>, Shift>, min_log_value: f64, description: &str) {
+fn plot_distribution(graph: &G, root: &mut DrawingArea<BitMapBackend<'_>, Shift>, min_log_value: f64, description: &str) {
     let transaction_log_values = graph
     .raw_edges()
     .iter()
     .map(|t|
-        get_price_at_timestamp(t.weight.timeStamp.parse().unwrap(), &prices)
-            * (t.weight.value.parse::<f64>().unwrap()) / 1e18
+            f64::log10(t.weight.usdt_value)
         )
-    .map(|v| f64::log10(v))
     .collect::<Vec<f64>>();
         
     let max_log_value = transaction_log_values
@@ -489,43 +429,6 @@ fn plot_distribution(graph: &G, prices: &Vec<EthPriceRecord>, root: &mut Drawing
     root.present().unwrap();
 }
 
-#[test]
-fn test_main() ->Result<(), ()> {  
-    let graph = deserialize_graph("handcrafted_for_testing.json").unwrap();
-    let prices = get_eth_hourly_prices("eth_prices.csv").unwrap();
-
-    let (graph_volume, graph_mean) = calculate_total_usd_volume(&graph, &prices);
-    assert_eq!(graph_volume.ceil(), 21011.0);
-    assert_eq!(graph_mean.ceil(), 2627.0);
-    assert_eq!(graph.edge_count(), 8);
-
-    // Price filtered graph
-    let usd_lower_bound = 10.0;
-    let usd_higher_bound = 1000.0;
-    let price_filtered_graph = filter_by_transaction_price(&graph, &prices, usd_lower_bound, usd_higher_bound);
-    let (price_filtered_graph_volume, price_filtered_graph_mean) = calculate_total_usd_volume(&price_filtered_graph, &prices);
-    assert_eq!(price_filtered_graph_volume.ceil(), 1127.0);
-    assert_eq!(price_filtered_graph_mean.ceil(), 564.0);
-    assert_eq!(price_filtered_graph.edge_count(), 2);
-    
-    // Two-way filtered graph
-    let twoway_filtered_graph = filter_twoway_edges(&graph);
-    let (twoway_filtered_graph_volume, twoway_filtered_graph_mean_value, twoway_filtered_graph_flow, _) = calculate_two_way_flow(&twoway_filtered_graph, &prices);
-    assert_eq!(twoway_filtered_graph_volume.ceil(), 12009.0) ;
-    assert_eq!(twoway_filtered_graph_mean_value.ceil(), 2002.0);
-    assert_eq!(twoway_filtered_graph_flow.ceil(), 3755.0);
-    assert_eq!(twoway_filtered_graph.edge_count(), 6);
-    
-    // Two-way and price filtered graph
-    let twoway_price_filtered_graph = filter_twoway_edges(&price_filtered_graph);
-    let (twoway_price_filtered_graph_volume, _, twoway_price_filtered_graph_flow, _) = calculate_two_way_flow(&twoway_price_filtered_graph, &prices);
-    assert_eq!(twoway_price_filtered_graph_volume, 0.0);
-    assert_eq!(twoway_price_filtered_graph_flow, 0.0);
-    assert_eq!(twoway_price_filtered_graph.edge_count(), 0);
-    
-    Ok(())
-}
-
 fn main() {  
     let async_timer: Instant = Instant::now();
     let api_key = get_api_key();
@@ -534,11 +437,9 @@ fn main() {
     println!("Async operations took {:.3} s", async_timer.elapsed().as_secs_f64());
     let timer: Instant = Instant::now();
     let mut result_log = String::new();
-    let _ = serialize_graph(&graph, "parsed.json").unwrap();
-    
-    let prices = get_eth_hourly_prices("eth_prices.csv").unwrap();
+    let _ = serialize_graph(&graph, "parsed_USDT.json").unwrap();
 
-    let (graph_volume, graph_mean) = calculate_total_usd_volume(&graph, &prices);
+    let (graph_volume, graph_mean) = calculate_total_usd_volume(&graph);
     let s = format!(
         "For all parsed transactions:\nTotal volume: {:.0} USD, Mean value: {:.0} USD, N: {}\n\n",
         graph_volume, graph_mean, graph.edge_count()
@@ -546,13 +447,42 @@ fn main() {
     print!("{}", &s);
     result_log.push_str(&s);
     let mut graph_root = BitMapBackend::new(&"main_graph.png", (720, 480)).into_drawing_area();
-    plot_distribution(&graph, &prices, &mut graph_root, 0.0, "Ethereum transaction value distribution (for all parsed transactions)");
+    plot_distribution(&graph, &mut graph_root, 0.0, "USDT transaction value distribution (for all parsed transactions)");
 
-    // Price filtered graph
+{
+    // Nonzero filtered graph
+    let usd_lower_bound = 0.0000001;
+    let usd_higher_bound = f64::MAX;
+    let price_filtered_graph = filter_by_transaction_price(&graph, usd_lower_bound, usd_higher_bound);
+    let (price_filtered_graph_volume, price_filtered_graph_mean) = calculate_total_usd_volume(&price_filtered_graph);
+    let s = format!(
+        "For transactions in {:.0e} - {:.0e} USD range:\nTotal volume: {:.0} USD, Mean value: {:.0} USD, N: {}\n\n",
+        usd_lower_bound, usd_higher_bound, price_filtered_graph_volume, price_filtered_graph_mean, price_filtered_graph.edge_count()
+    );
+    print!("{}", &s);
+    result_log.push_str(&s);
+}
+
+{
+    // 0 filtered graph
+    let usd_lower_bound = 0.0;
+    let usd_higher_bound = 0.0;
+    let price_filtered_graph = filter_by_transaction_price(&graph, usd_lower_bound, usd_higher_bound);
+    let (price_filtered_graph_volume, price_filtered_graph_mean) = calculate_total_usd_volume(&price_filtered_graph);
+    let s = format!(
+        "For transactions in {}-{} USD range:\nTotal volume: {:.0} USD, Mean value: {:.0} USD, N: {}\n\n",
+        usd_lower_bound, usd_higher_bound, price_filtered_graph_volume, price_filtered_graph_mean, price_filtered_graph.edge_count()
+    );
+    print!("{}", &s);
+    result_log.push_str(&s);
+}
+
+{
+    // 10-1000 filtered graph
     let usd_lower_bound = 10.0;
     let usd_higher_bound = 1000.0;
-    let price_filtered_graph = filter_by_transaction_price(&graph, &prices, usd_lower_bound, usd_higher_bound);
-    let (price_filtered_graph_volume, price_filtered_graph_mean) = calculate_total_usd_volume(&price_filtered_graph, &prices);
+    let price_filtered_graph = filter_by_transaction_price(&graph, usd_lower_bound, usd_higher_bound);
+    let (price_filtered_graph_volume, price_filtered_graph_mean) = calculate_total_usd_volume(&price_filtered_graph);
     let s = format!(
         "For transactions in {}-{} USD range:\nTotal volume: {:.0} USD, Mean value: {:.0} USD, N: {}\n\n",
         usd_lower_bound, usd_higher_bound, price_filtered_graph_volume, price_filtered_graph_mean, price_filtered_graph.edge_count()
@@ -560,41 +490,11 @@ fn main() {
     print!("{}", &s);
     result_log.push_str(&s);
     let mut price_filtered_graph_root = BitMapBackend::new(&"price_filtered_graph.png", (720, 480)).into_drawing_area();
-    plot_distribution(&price_filtered_graph, &prices, &mut price_filtered_graph_root, 1.0, "Ethereum transaction value distribution (for transactions in the 10-1000 USD range)");
-
-    // Two-way filtered graph
-    let twoway_filtered_graph = filter_twoway_edges(&graph);
-    let (twoway_filtered_graph_volume, twoway_filtered_graph_mean_value, twoway_filtered_graph_flow, twoway_filtered_graph_logs) = calculate_two_way_flow(&twoway_filtered_graph, &prices);
-    let s = format!(
-        "For two-way transactions: \nTotal volume: {:.0} USD, Mean value: {:.0} USD, Total flow: {:.0} USD, N: {}\n\n",
-        twoway_filtered_graph_volume, twoway_filtered_graph_mean_value, twoway_filtered_graph_flow, twoway_filtered_graph.edge_count()
-    );
-    print!("{}", &s);
-    result_log.push_str(&s);
-    let mut twoway_filtered_graph_root = BitMapBackend::new(&"twoway_filtered_graph.png", (720, 480)).into_drawing_area();
-    plot_distribution(&twoway_filtered_graph, &prices, &mut twoway_filtered_graph_root, 0.0, "Ethereum transaction value distribution (for two-way transactions)");   
-    
-    // Two-way and price filtered graph
-    let twoway_price_filtered_graph = filter_twoway_edges(&price_filtered_graph);
-    let (twoway_price_filtered_graph_volume, twoway_price_filtered_graph_mean_value, twoway_price_filtered_graph_flow, twoway_price_filtered_graph_logs) = calculate_two_way_flow(&twoway_price_filtered_graph, &prices);
-    let s = format!(
-        "For two-way transactions in {}-{} USD range: \nTotal volume: {:.0} USD, Mean value: {:.0} USD, Total flow: {:.0} USD, N: {}\n\n",
-        usd_lower_bound, usd_higher_bound, twoway_price_filtered_graph_volume, twoway_price_filtered_graph_mean_value, twoway_price_filtered_graph_flow, twoway_price_filtered_graph.edge_count()
-    );
-    print!("{}", &s);
-    result_log.push_str(&s);
-    let mut twoway_price_filtered_graph_root = BitMapBackend::new(&"twoway_price_filtered_graph.png", (720, 480)).into_drawing_area();
-    plot_distribution(&twoway_price_filtered_graph, &prices, &mut twoway_price_filtered_graph_root, 1.0, "Ethereum transaction value distribution (for two-way transactions in the 10-1000 USD range)");
-
+    plot_distribution(&price_filtered_graph, &mut price_filtered_graph_root, 1.0, "USDT value distribution (for transactions in the 10-1000 USD range)");    
+}
+ 
     let mut log_file_main= File::create("result.txt").unwrap();
     write!(log_file_main, "{}", result_log).unwrap();
-
-    let mut log_file_twoway = File::create("twoway_filtered_graph_logs.txt").unwrap();    
-    let mut log_file_twoway_price = File::create("twoway_price_filtered_graph_logs.txt").unwrap();    
-    let twoway_filtered_graph_logs = format!("Two-way transactions in {}-{} USD range detailed logs:\n{}", usd_lower_bound, usd_higher_bound, twoway_filtered_graph_logs);
-    let twoway_price_filtered_graph_logs = format!("Two-way transactions detailed logs:\n{}", twoway_price_filtered_graph_logs);
-    log_file_twoway.write_all(twoway_filtered_graph_logs.as_bytes()).unwrap();
-    log_file_twoway_price.write_all(twoway_price_filtered_graph_logs.as_bytes()).unwrap();
 
     println!("Local operations took {:.3} s", timer.elapsed().as_secs_f64());
     println!("Local + async operations took {:.3} s", async_timer.elapsed().as_secs_f64());

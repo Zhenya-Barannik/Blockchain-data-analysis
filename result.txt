@@ -1,12 +1,12 @@
 For all parsed transactions:
-Total volume: 394471990922 USD, Mean value: 15778 USD, N: 25000706
+Total volume: 907606864 USD, Mean value: 8877 USD, N: 102242
+
+For transactions in 1e-7 - 2e308 USD range:
+Total volume: 907606864 USD, Mean value: 40821 USD, N: 22234
+
+For transactions in 0-0 USD range:
+Total volume: 0 USD, Mean value: 0 USD, N: 80008
 
 For transactions in 10-1000 USD range:
-Total volume: 805496784 USD, Mean value: 236 USD, N: 3416033
-
-For two-way transactions: 
-Total volume: 103188315036 USD, Mean value: 232218 USD, Total flow: 33879598012 USD, N: 444360
-
-For two-way transactions in 10-1000 USD range: 
-Total volume: 27949715 USD, Mean value: 194 USD, Total flow: 12266553 USD, N: 144336
+Total volume: 3827962 USD, Mean value: 306 USD, N: 12524
 
