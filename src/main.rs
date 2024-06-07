@@ -70,7 +70,7 @@ struct SerializableGraph {
 type G = Graph<String, SimplifiedTransaction, Directed>;
 
 const TRAVERSAL_STARTING_ADDRESS: &str = "0x21a31ee1afc51d94c2efccaa2092ad1028285549"; // Binance affiliated address
-const MAX_TRANSACTIONS_TO_PARSE: usize = 100_000; // Limit of transactions near which parsing will be stopped.
+const MAX_TRANSACTIONS_TO_PARSE: usize = 10_000_000; // Limit of transactions near which parsing will be stopped.
 const TRANSACTIONS_TO_REQUEST_FROM_EACH_ADDRESS: usize = 10_000; // Limit of transactions to request (from and to) one particular address, <= 10000
 const DATA_STORAGE_FOLDER: &str = "json";
 

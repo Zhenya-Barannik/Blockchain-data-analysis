@@ -1,12 +1,12 @@
 For all parsed transactions:
-Total volume: 907606864 USD, Mean value: 8877 USD, N: 102242
+Total volume: 88255036629 USD, Mean value: 8822 USD, N: 10003726
 
 For transactions in 1e-7 - 2e308 USD range:
-Total volume: 907606864 USD, Mean value: 40821 USD, N: 22234
+Total volume: 88255036629 USD, Mean value: 375130 USD, N: 235265
 
 For transactions in 0-0 USD range:
-Total volume: 0 USD, Mean value: 0 USD, N: 80008
+Total volume: 0 USD, Mean value: 0 USD, N: 9768461
 
 For transactions in 10-1000 USD range:
-Total volume: 3827962 USD, Mean value: 306 USD, N: 12524
+Total volume: 29282446 USD, Mean value: 308 USD, N: 94981
 
