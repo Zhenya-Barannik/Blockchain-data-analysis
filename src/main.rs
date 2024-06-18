@@ -91,20 +91,23 @@ enum OnchainFunction {
 
 #[derive(Hash, PartialEq, Eq, Deserialize, Serialize, Debug, Clone, EnumIter)]
 enum Payload {
-    USDT = 1,
-    USDC = 2,
+    BSCUSD,
+    USDC,
 }
 
-const TRAVERSAL_STARTING_ADDRESS: &str = "0x760DcE7eA6e8BA224BFFBEB8a7ff4Dd1Ef122BfF";
+const SATOSHI_TO_COIN_CONVERSION_FACTOR: usize = 1E18 as usize;
+// 1E18  for bscscan
+
+const TRAVERSAL_STARTING_ADDRESS: &str = "0x94453A61CAbCd51ef1031f527Fd2b76f659423e7";
 const MAX_TRANSACTIONS_TO_PARSE: usize = 10_000_000;
 const TRANSACTIONS_TO_REQUEST: usize = 10_000; // <= 10000. Limit of transactions to request (from and to) one particular address
 const DATA_STORAGE_FOLDER: &str = "json";
 
 static CONTRACT_ADDRESSES: Lazy<Mutex<HashMap<Payload, String>>> = Lazy::new(|| {
     let mut m = HashMap::new();
-    let usdt_contract = "0xc2132D05D31c914a87C6611C10748AEb04B58e8F".to_string().to_lowercase();
-    let usdc_contract = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359".to_string().to_lowercase();
-    m.insert(Payload::USDT, usdt_contract);
+    let bscusd_contract = "0x55d398326f99059fF775485246999027B3197955".to_string().to_lowercase();
+    let usdc_contract = "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d".to_string().to_lowercase();
+    m.insert(Payload::BSCUSD, bscusd_contract);
     m.insert(Payload::USDC, usdc_contract);
     Mutex::new(m)
 });
@@ -123,7 +126,7 @@ static METHOD_IDS: Lazy<Mutex<HashMap<OnchainFunction, OnchainFunctionDescriptio
     m.insert(OnchainFunction::Transfer,
     OnchainFunctionDescription {
         method_id: "0xa9059cbb".to_string(),
-        function_name:  "transfer(address dst, uint256 rawAmount)".to_string(),
+        function_name:  "transfer(address _to, uint256 _value)".to_string(),
         input_lenth: 138,
         to_slice: (10, 74),
         value_slice: (74, 138),
@@ -132,7 +135,7 @@ static METHOD_IDS: Lazy<Mutex<HashMap<OnchainFunction, OnchainFunctionDescriptio
     m.insert(OnchainFunction::TransferFrom,
     OnchainFunctionDescription {
         method_id: "0x23b872dd".to_string(),
-        function_name:  "transferFrom(address src, address dst, uint256 rawAmount)".to_string(),
+        function_name:  "transferFrom(address _from, address _to, uint256 _value)".to_string(),
         input_lenth: 202,
         from_slice: Some((10, 74)),
         to_slice: (74, 138),
@@ -149,7 +152,7 @@ async fn get_transactions(address: &str, client: &Client, api_key: &String) -> R
     let offset = TRANSACTIONS_TO_REQUEST;
 
     let request_url = format!(
-        "https://api.polygonscan.com/api?module=account&action=txlist&address={}&startblock={}&endblock={}&page={}&offset={}&sort={}&apikey={}",
+        "https://api.bscscan.com/api?module=account&action=txlist&address={}&startblock={}&endblock={}&page={}&offset={}&sort={}&apikey={}",
         address, start_block, end_block, page, offset, sort, api_key
     );
     let response = client.get(&request_url).send().await?;
@@ -235,10 +238,9 @@ async fn graph_data_collection_procedure(
                                 };
 
                             let real_transaction_destination = transaction.input[to_slice_low..to_slice_high].to_string(); // Real transaction destination
-                            let usd_value = primitive_types::U256::from_str_radix(&transaction.input[value_slice_low..value_slice_high], 16)
-                                .unwrap()
-                                .as_u64()
-                                .as_f64() / 1E6;
+                            let u256_value = primitive_types::U256::from_str_radix(&transaction.input[value_slice_low..value_slice_high], 16).unwrap();
+
+                            let usd_value = (u256_value / SATOSHI_TO_COIN_CONVERSION_FACTOR).as_u64().as_f64();
 
                             let digested_transaction = Transaction {
                                 hash: transaction.hash.clone(),
