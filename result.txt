@@ -1,45 +1,45 @@
 For all parsed transactions:
-Total volume: 16324613548 USD, Edges: 10005859, Nodes: 1730025
+Total volume: 141791251 USD, Edges: 18581, Nodes: 10115
 
 For transactions filtered in 1.000e-9 to 1.798e308 Range:
-Total volume: 16324613548 USD, Mean value: 42638 USD, Edges: 382864, Nodes: 212281
+Total volume: 141791251 USD, Mean value: 16485 USD, Edges: 8601, Nodes: 9065
 FilteringResultInfo {
-    node_count_before_filtering: 1730025,
-    edge_count_before_filtering: 10005859,
-    node_count: 212281,
-    edge_count: 382864,
+    node_count_before_filtering: 10115,
+    edge_count_before_filtering: 18581,
+    node_count: 9065,
+    edge_count: 8601,
 }
 
 For BSCUSD transactions:
-Total volume: 11386906760 USD, Mean value: 30990 USD, Edges: 367433, Nodes: 201767
+Total volume: 95 USD, Mean value: 95 USD, Edges: 1, Nodes: 2
 FilteringResultInfo {
-    node_count_before_filtering: 212281,
-    edge_count_before_filtering: 382864,
-    node_count: 201767,
-    edge_count: 367433,
+    node_count_before_filtering: 9065,
+    edge_count_before_filtering: 8601,
+    node_count: 2,
+    edge_count: 1,
 }
 For transactions filtered in 1.000e1 to 1.000e3 Range:
-Total volume: 48663894 USD, Mean value: 192 USD, Edges: 252808, Nodes: 160700
+Total volume: 95 USD, Mean value: 95 USD, Edges: 1, Nodes: 2
 FilteringResultInfo {
-    node_count_before_filtering: 201767,
-    edge_count_before_filtering: 367433,
-    node_count: 160700,
-    edge_count: 252808,
+    node_count_before_filtering: 2,
+    edge_count_before_filtering: 1,
+    node_count: 2,
+    edge_count: 1,
 }
 
 For USDC transactions:
-Total volume: 4937706788 USD, Mean value: 319986 USD, Edges: 15431, Nodes: 11304
+Total volume: 141791156 USD, Mean value: 16487 USD, Edges: 8600, Nodes: 9065
 FilteringResultInfo {
-    node_count_before_filtering: 212281,
-    edge_count_before_filtering: 382864,
-    node_count: 11304,
-    edge_count: 15431,
+    node_count_before_filtering: 9065,
+    edge_count_before_filtering: 8601,
+    node_count: 9065,
+    edge_count: 8600,
 }
 For transactions filtered in 1.000e1 to 1.000e3 Range:
-Total volume: 1708260 USD, Mean value: 181 USD, Edges: 9445, Nodes: 8381
+Total volume: 895500 USD, Mean value: 180 USD, Edges: 4980, Nodes: 5248
 FilteringResultInfo {
-    node_count_before_filtering: 11304,
-    edge_count_before_filtering: 15431,
-    node_count: 8381,
-    edge_count: 9445,
+    node_count_before_filtering: 9065,
+    edge_count_before_filtering: 8600,
+    node_count: 5248,
+    edge_count: 4980,
 }
