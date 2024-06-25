@@ -1,16 +1,12 @@
 use eyre::Result;
-use petgraph::graph::EdgeIndex;
-use petgraph::visit::IntoEdges;
-use petgraph::{graph::NodeIndex, visit::EdgeRef, Directed};
+use petgraph::{graph::NodeIndex, Directed};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::borrow::Borrow;
 use std::collections::HashMap;
-use std::isize;
 use tokio::runtime::Runtime;
 use petgraph::Graph;
-use std::fs::File;
-use std::io::{self, Read, Write};
+use std::fs::{self, File};
+use std::io::{Read, Write};
 use std::time::Instant;
 use priority_queue::PriorityQueue;
 use plotters::{coord::Shift, prelude::*};
@@ -68,8 +64,8 @@ struct DigestedData {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct FilteringResultInfo {
-    node_count_before_filtering: usize, // Before all nodigested transactions were filtered
-    edge_count_before_filtering: usize, // Before all nodigested transactions were filtered
+    node_count_before_filtering: usize,
+    edge_count_before_filtering: usize,
     node_count: usize,
     edge_count: usize,
 }
@@ -95,12 +91,11 @@ enum Payload {
     USDC,
 }
 
-const SATOSHI_TO_COIN_CONVERSION_FACTOR: usize = 1E18 as usize;
-// 1E18  for bscscan
+const SATOSHI_TO_COIN_CONVERSION_FACTOR: usize = 1E18 as usize; // 1E18  for bscscan
 
 const TRAVERSAL_STARTING_ADDRESS: &str = "0x94453A61CAbCd51ef1031f527Fd2b76f659423e7";
 const MAX_TRANSACTIONS_TO_PARSE: usize = 10_000_000;
-const TRANSACTIONS_TO_REQUEST: usize = 10_000; // <= 10000. Limit of transactions to request (from and to) one particular address
+const TRANSACTIONS_TO_REQUEST: usize = 10_000; // <= 10000.
 const DATA_STORAGE_FOLDER: &str = "json";
 
 static CONTRACT_ADDRESSES: Lazy<Mutex<HashMap<Payload, String>>> = Lazy::new(|| {
@@ -272,7 +267,7 @@ async fn graph_data_collection_procedure(
                     }
                 }
 
-                let not_digested_transaction = Transaction {
+                let undigested_transaction = Transaction {
                     hash: transaction.hash.clone(),
                     data: None
                 };
@@ -283,17 +278,17 @@ async fn graph_data_collection_procedure(
                     blockchain_graph.add_node(transaction.from.clone())
                 });
 
-                // WARNING: The "target" may end up being not a real transaction destination, but a contract address.
-                // This is a catch-all branch for not digested transactions.
-                // Hash will be unique anyway.
+                // This is a catch-all branch for undigested transactions.
+                // The "target" may end up being not a real transaction destination, but a contract address.
+                // Hash will be unique tho.
                 let target = *node_indices
                 .entry(transaction.to.clone())
                 .or_insert_with(|| {
                     blockchain_graph.add_node(transaction.to.clone())
                 });
 
-                edges.insert(transaction.hash.clone(), not_digested_transaction.clone());
-                blockchain_graph.add_edge(origin, target, not_digested_transaction);
+                edges.insert(transaction.hash.clone(), undigested_transaction.clone());
+                blockchain_graph.add_edge(origin, target, undigested_transaction);
             }
         }
     }
@@ -354,38 +349,12 @@ fn serialize_graph(filtered_graph: &G, info: &FilteringResultInfo, pathname: &st
 
     let serializable_graph = SerializableGraph {info: info.clone(), nodes, edges };
     let file_pathname = format!("{}/{}", DATA_STORAGE_FOLDER, pathname);
+    fs::create_dir_all(DATA_STORAGE_FOLDER).unwrap();
     let file = File::create(&file_pathname)?;
     serde_json::to_writer_pretty(file, &serializable_graph)?;
     println!("\nSaved graph as {}\n", &file_pathname);
     Ok(())
 }
-
-// #[allow(dead_code)]
-// fn deserialize_graph(pathname: &str) -> Result<G> {
-//     let file_pathname = format!("{}/{}", DATA_STORAGE_FOLDER, pathname);
-//     let mut json = String::new();
-
-//     println!("\nTrying to load {}", file_pathname);
-//     let mut file = File::open(&file_pathname).map_err(|_| eyre::eyre!(format!("File {} not found.", file_pathname)))
-//     .unwrap();
-
-//     file.read_to_string(&mut json).unwrap();
-
-//     let serializable_graph: SerializableGraph = serde_json::from_str(&json)?;
-
-//     let mut graph = Graph::new();
-//     let mut node_indices = Vec::new();
-
-//     for node in serializable_graph.nodes {
-//         node_indices.push(graph.add_node(node));
-//     }
-
-//     for (source, target, weight) in serializable_graph.edges {
-//         graph.add_edge(node_indices[source], node_indices[target], weight);
-//     }
-
-//     Ok(graph)
-// }
 
 fn read_api_key() -> String {
     let mut api_key: String = String::new();
