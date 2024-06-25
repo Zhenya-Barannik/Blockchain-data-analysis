@@ -1,12 +1,45 @@
 For all parsed transactions:
-Total volume: 394471990922 USD, Mean value: 15778 USD, N: 25000706
+Total volume: 16324613548 USD, Edges: 10005859, Nodes: 1730025
 
-For transactions in 10-1000 USD range:
-Total volume: 805496784 USD, Mean value: 236 USD, N: 3416033
+For transactions filtered in 1.000e-9 to 1.798e308 Range:
+Total volume: 16324613548 USD, Mean value: 42638 USD, Edges: 382864, Nodes: 212281
+FilteringResultInfo {
+    node_count_before_filtering: 1730025,
+    edge_count_before_filtering: 10005859,
+    node_count: 212281,
+    edge_count: 382864,
+}
 
-For two-way transactions: 
-Total volume: 103188315036 USD, Mean value: 232218 USD, Total flow: 33879598012 USD, N: 444360
+For BSCUSD transactions:
+Total volume: 11386906760 USD, Mean value: 30990 USD, Edges: 367433, Nodes: 201767
+FilteringResultInfo {
+    node_count_before_filtering: 212281,
+    edge_count_before_filtering: 382864,
+    node_count: 201767,
+    edge_count: 367433,
+}
+For transactions filtered in 1.000e1 to 1.000e3 Range:
+Total volume: 48663894 USD, Mean value: 192 USD, Edges: 252808, Nodes: 160700
+FilteringResultInfo {
+    node_count_before_filtering: 201767,
+    edge_count_before_filtering: 367433,
+    node_count: 160700,
+    edge_count: 252808,
+}
 
-For two-way transactions in 10-1000 USD range: 
-Total volume: 27949715 USD, Mean value: 194 USD, Total flow: 12266553 USD, N: 144336
-
+For USDC transactions:
+Total volume: 4937706788 USD, Mean value: 319986 USD, Edges: 15431, Nodes: 11304
+FilteringResultInfo {
+    node_count_before_filtering: 212281,
+    edge_count_before_filtering: 382864,
+    node_count: 11304,
+    edge_count: 15431,
+}
+For transactions filtered in 1.000e1 to 1.000e3 Range:
+Total volume: 1708260 USD, Mean value: 181 USD, Edges: 9445, Nodes: 8381
+FilteringResultInfo {
+    node_count_before_filtering: 11304,
+    edge_count_before_filtering: 15431,
+    node_count: 8381,
+    edge_count: 9445,
+}
