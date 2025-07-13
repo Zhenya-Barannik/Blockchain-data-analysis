@@ -78,7 +78,30 @@ SELECT
     AS "zero_value_transaction_ratio"
 FROM t;
 ```
+### Взаимные транзакции ETH в сети Ethereum
+Взаимными транзакциями будем называть все транзакции между двумя адресами A и B, если между этими адресами есть как минимум одна транзакция A → B и как минимум одна транзакция B → A. Время между этими транзакциями мы не учитываем. Пример набора таких транзакций:
 
+```
+Two-way transactions for addresses 
+"0xa7efae728d2936e78bda97dc267687568dd593f3" <-> "0x55160fa2eb5eff4456d25482b9afb03c868e9350"
+(3 + 2):
+      |-> hash: 0x5293b603162cfff14b41d902c82c7249349103b4946448289e033b0591a05887 at 1716965987 unix epoch, value: 375 USD
+      |-> hash: 0xa3c9df8204a0fc98be85e23c4405c9fc68240cff20c310600a0a46fe9e3345fe at 1717056155 unix epoch, value: 38 USD
+      |-> hash: 0x76842c9c9753c8a976ef31f51260829f1d33033f768d3586e3ffc55ea8b7cccf at 1717061507 unix epoch, value: 745 USD
+      <-| hash: 0xf035bdbcdf8c3ef1dccdd9a081a28ca7683d9737689179923b29157f5a3e98cb at 1716962819 unix epoch, value: 187 USD
+      <-| hash: 0x2997b83b390ad8914052eb9cd0767c0b42d84899835c0fd807e42826ca014aba at 1717058807 unix epoch, value: 444 USD
+Value for this set: 1789 USD, Flow for this set: 528 USD
+```
+Интересно, что у отфильтрованных таким образом транзакций другая статистика.
+
+![ETH-two-way-on-Ethereum-statistics.png](ETH-two-way-on-Ethereum-statistics.png)
+
+Всего таких транзакций 1.8%, но в них содержится 26.2% всей пересылаемой ценности.
+
+**Статистика для взаимных транзакций**<br/>
+Отправленная транзакциям ценность (two-way): 103_188_315_036 USD<br/>
+Средняя ценность транзакции (two-way): 232_218 USD<br/>
+Количество транзакций (two-way): 444_360<br/>
 ### Транзакции с USDT и USDC в сети Ethereum
 Данные выше показывают статистику только по перемещению ETH в сети Ethereum. С целью получить статистику по перемещению USDT и USDC мы провели два эксперимента, просмотрев по 10 миллионов транзакций в каждом.
 
